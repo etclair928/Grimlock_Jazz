@@ -13,7 +13,7 @@
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import numpy as np
 import librosa
@@ -99,4 +99,56 @@ def transcribe_bass(
     return notes
 
 
-__all__ = ["transcribe_bass", "CREPE_SAMPLE_RATE"]
+def continuous_f0(
+        engine: AudioEngine,
+        track: AudioTrack,
+        confidence_floor: float = 0.50,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """CREPE's RAW, UNQUANTIZED f0 stream for `track` - the same
+    prediction transcribe_bass() segments into Notes, returned before
+    any segmentation or semitone rounding happens.
+
+    This exists because Basic Pitch's note posteriorgram is an 88-bin,
+    one-bin-per-semitone grid: it has no bin for a pitch that genuinely
+    sits between two semitones, so a singer sustaining one flickers
+    between the two bins it straddles. Detecting that requires a pitch
+    reader that is NOT quantized to semitones, which is exactly what
+    CREPE's frequency output is.
+
+    Returns (times_ms, frequency_hz). Frames below `confidence_floor`
+    are returned as 0.0 rather than dropped, so the arrays stay
+    index-aligned with a uniform time base - a caller slicing a span
+    can tell "unvoiced here" apart from "no data."
+    """
+    import crepe
+
+    view = engine.view(track, CREPE_SAMPLE_RATE)
+    audio = view.samples
+
+    get_crepe_model(CREPE_MODEL_CAPACITY)
+
+    time_s, frequency, confidence, _ = crepe.predict(
+        audio, CREPE_SAMPLE_RATE, viterbi=True, model_capacity=CREPE_MODEL_CAPACITY,
+        step_size=CREPE_STEP_SIZE_MS, verbose=0,
+    )
+
+    frequency = np.asarray(frequency, dtype=np.float64).copy()
+    frequency[np.asarray(confidence) < confidence_floor] = 0.0
+    return np.asarray(time_s, dtype=np.float64) * 1000.0, frequency
+
+
+def make_f0_sampler(times_ms: np.ndarray, frequency_hz: np.ndarray):
+    """Wraps a continuous_f0() result as the `sample_continuous_pitch_hz`
+    callable pitch_wobble_collapse's Gate 4 requires: given a
+    [start_ms, end_ms) span, return the voiced f0 samples inside it."""
+    def sample(start_ms: float, end_ms: float) -> np.ndarray:
+        lo = int(np.searchsorted(times_ms, start_ms, side="left"))
+        hi = int(np.searchsorted(times_ms, end_ms, side="right"))
+        if hi <= lo:
+            return np.empty(0, dtype=np.float64)
+        span = frequency_hz[lo:hi]
+        return span[span > 0.0]
+    return sample
+
+
+__all__ = ["transcribe_bass", "continuous_f0", "make_f0_sampler", "CREPE_SAMPLE_RATE"]

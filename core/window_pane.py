@@ -21,7 +21,13 @@
 # per-event OS threads, an async/sync mismatch, unbounded memory
 # growth, and GIL-dependent thread-safety.
 #
-# NOT wired into the Conductor. Standalone until explicitly adopted.
+# STATUS: STAGED, NOT DEAD. Deliberately not wired into the Conductor
+# yet - its consumer is the live dashboard / GUI frontend, which does
+# not exist yet. This is the observability half of that feature, built
+# and probe-verified ahead of it, and it is a known, decided part of
+# the 6.0 plan - not orphaned code. A wiring audit that flags this
+# should read this line and move on; the resolution is "build the
+# frontend," not "delete this." Standalone until that frontend adopts it.
 # =================================================================
 
 from __future__ import annotations

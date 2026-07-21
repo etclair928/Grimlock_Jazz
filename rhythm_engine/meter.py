@@ -43,6 +43,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -55,6 +56,10 @@ METER_HOP_LENGTH = 512
 CANDIDATE_NUMERATORS = (2, 3, 4, 5, 6, 7, 9, 12)
 NUMERATORS_WITH_COMPOUND_READING = (6, 9, 12)
 N_PERMUTATIONS = 100
+# A pickup is only declared when the off-beat-0 downbeat clears BOTH the
+# shuffle significance test AND this salience floor. Marginal significance
+# at tiny salience is accent-fold noise, not a real anacrusis.
+PICKUP_MIN_CONFIDENCE = 0.30
 SIGNIFICANCE_PERCENTILE = 95.0
 
 
@@ -143,6 +148,65 @@ def _score_candidate(beat_accents: np.ndarray, numerator: int) -> Tuple[float, i
     score = max(0.0, min(1.0, (real_salience - chance_baseline) / (1.0 - chance_baseline)))
     is_significant = real_salience > chance_threshold
     return score, winning_phase, is_significant
+
+
+@dataclass(frozen=True)
+class PickupResult:
+    """Where the first true downbeat falls. `pickup_beats` is how many
+    beats precede it - the anacrusis. 0 means the song starts ON beat 1
+    (no pickup)."""
+    pickup_beats: int
+    downbeat_phase: int        # beat index (mod numerator) carrying the downbeat
+    numerator: int
+    confidence: float
+    is_significant: bool
+    detail: str = ""
+
+
+def detect_pickup(
+        engine: AudioEngine,
+        track: AudioTrack,
+        beat_times_ms: Sequence[float],
+        numerator: int,
+) -> PickupResult:
+    """Detects a pickup/anacrusis: does beat 0 carry the downbeat, or do
+    the first N beats precede the first full measure?
+
+    Reuses the same chance-corrected downbeat-salience machinery the meter
+    detector already trusts (_score_candidate): fold the per-beat accents
+    by the bar length, find which beat-in-bar is the loudest (the
+    downbeat), and read the pickup off its phase.
+
+    BURDEN OF PROOF is on 'there is a pickup', never on 'there isn't': a
+    non-zero pickup is only reported when the off-beat-0 downbeat is
+    STATISTICALLY significant against shuffled accents. A song that starts
+    on the downbeat, and a song whose first-beat evidence is weak, both
+    return pickup_beats = 0. We do not invent anacruses."""
+    if numerator < 2 or len(beat_times_ms) < numerator * 2:
+        return PickupResult(0, 0, numerator, 0.0, False, "too few beats to judge")
+
+    accents = sample_beat_accents(engine, track, beat_times_ms)
+    score, phase, is_significant = _score_candidate(accents, numerator)
+
+    # Burden of proof: a non-zero pickup needs BOTH statistical significance
+    # AND a real salience margin. A marginally-significant weak downbeat
+    # (e.g. a 5-beat "pickup" at score 0.12) is noise in the accent fold, not
+    # an anacrusis - a song that starts on the downbeat reads pickup 0.
+    if phase == 0 or not is_significant or score < PICKUP_MIN_CONFIDENCE:
+        reason = ("starts on the downbeat" if phase == 0
+                  else f"downbeat-at-beat-{phase} not significant vs chance" if not is_significant
+                  else f"downbeat-at-beat-{phase} salience {score:.2f} below floor {PICKUP_MIN_CONFIDENCE} - too weak to call")
+        return PickupResult(
+            pickup_beats=0, downbeat_phase=phase, numerator=numerator,
+            confidence=score, is_significant=is_significant,
+            detail=reason + " - no pickup declared",
+        )
+
+    return PickupResult(
+        pickup_beats=phase, downbeat_phase=phase, numerator=numerator,
+        confidence=score, is_significant=True,
+        detail=f"first downbeat at beat index {phase} -> {phase}-beat pickup",
+    )
 
 
 def sample_beat_accents(engine: AudioEngine, track: AudioTrack, beat_times_ms: Sequence[float]) -> np.ndarray:
@@ -246,4 +310,5 @@ def estimate_time_signature(
 __all__ = [
     "build_phase_locked_grid", "estimate_time_signature",
     "sample_beat_accents", "fft_meter_candidate", "resolve_denominator",
+    "PickupResult", "detect_pickup",
 ]

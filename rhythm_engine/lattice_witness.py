@@ -76,7 +76,19 @@ TACTUS_PRIOR_OCTAVE_STD = 0.9
 @dataclass(frozen=True)
 class Anchor:
     """A confirmed structural downbeat. Sacred - never mutated, only
-    ever produced fresh by whatever detector confirmed it."""
+    ever produced fresh by whatever detector confirmed it.
+
+    STATUS: latent-by-design, not dead. `_anchor_alignment` / `search_lattice`
+    fully consume anchors, but `run_lattice_witness` is called with none.
+    Wiring kick attacks in as anchors was TRIED and MEASURED (2026-07-20):
+    it made the lattice a more confident tempo witness, which survived the
+    referee's #270 exclusion filter and pulled the resolved tempo UP toward
+    the note-onset witness's ~19%-high reading (#271) - Hopeful 148->153.8,
+    No Pasaran 132->136.4, both wrong. So anchors must NOT feed the contested
+    tempo vote. Their correct home is a consumer that reads the lattice
+    DIRECTLY for a notation-grid phase-lock, where "put the kicks on the
+    grid" is the whole point and there is no witness reconciliation to skew.
+    Kept for that future consumer; do not re-flag as unused."""
     time_ms: float
     confidence: float
 

@@ -13,8 +13,10 @@ from pitch_engine.basic_pitch_engine import (
     BASIC_PITCH_SAMPLE_RATE,
 )
 from pitch_engine.crepe_bass import transcribe_bass as transcribe_crepe_bass
+from pitch_engine.crepe_bass import continuous_f0, make_f0_sampler
 
 __all__ = [
     "transcribe_basic_pitch", "transcribe_basic_pitch_with_posteriorgram",
     "BasicPitchPosteriorgram", "BASIC_PITCH_SAMPLE_RATE", "transcribe_crepe_bass",
+    "continuous_f0", "make_f0_sampler",
 ]

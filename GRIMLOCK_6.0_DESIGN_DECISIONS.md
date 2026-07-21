@@ -237,6 +237,26 @@ Highly optimized DSP domain. **No ML models live here.**
 - The single **Compositor / commit step**: reads the immutable notes + all
   attached annotations and emits the MIDI in ONE auditable place. This is
   where the MIDI transcription lives.
+- **An exporter is a VIEW, and a view must never emit something that won't
+  open** (learned 2026-07-20). The first `NotationScore` → MusicXML exporter
+  assumed each part was monophonic and let music21 invent voices for any
+  overlaps. On a polyphonic part it produced **seven voices numbered from 0
+  on one staff**, and MuseScore rejected the whole file as "corrupted" — for
+  two format constraints the exporter never enforced:
+    - MusicXML `<voice>` numbers **must start at 1**, never 0.
+    - Engravers (MuseScore, Finale, Sibelius) represent **at most 4 voices
+      per staff**. More is invalid, not merely ugly.
+  The fix makes validity **structural**, not incidental: the exporter itself
+  groups near-simultaneous onsets into chords, splits only genuinely
+  staggered overlap into monophonic voices, caps voices at 4 per staff and
+  spills the rest onto additional staves, and normalizes `<voice>` to a dense
+  1..N in the bytes on disk. **Rule for every future exporter:** it may
+  render an upstream mess uglily (that honestly reflects bad input — e.g.
+  voice separation that isn't fixed yet), but it may never produce output the
+  target format calls corrupt. Verify against the format's real limits, not
+  just "is it well-formed XML" — MuseScore's validator is far stricter, and
+  the MIDI files were fine the whole time precisely because MIDI has no such
+  per-staff-voice concept to violate.
 
 ### Orchestration Conductor
 - **6.0: correct, deterministic, LINEAR.** Get it right first.

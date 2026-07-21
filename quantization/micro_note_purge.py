@@ -75,22 +75,9 @@ def evaluate_legitimacy(note: Note, harmonic_series_match_ratio: Optional[float]
     )
 
 
-def evaluate_legitimacy_batch(
-        notes: List[Note],
-        harmonic_ratios_by_note_id: Optional[Dict[str, float]] = None,
-) -> List[LegitimacyVerdict]:
-    """Convenience wrapper for the Conductor's per-stem note loop."""
-    harmonic_ratios_by_note_id = harmonic_ratios_by_note_id or {}
-    return [
-        evaluate_legitimacy(note, harmonic_ratios_by_note_id.get(note.id))
-        for note in notes
-    ]
-
-
 __all__ = [
     "LegitimacyVerdict",
     "evaluate_legitimacy",
-    "evaluate_legitimacy_batch",
     "MICRO_NOTE_PURGE_ANNOTATION_KIND",
     "PURGE_CANDIDATE",
     "LEGITIMATE",

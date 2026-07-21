@@ -11,8 +11,14 @@
 from quantization.lattice_judge import TemporalLattice, QuantizationMode, build_lattice, QUANTIZATION_ANNOTATION_KIND
 from quantization.duration_witness import DurationHypothesis, DurationTestimony, infer_duration
 from quantization.sustain_recovery import SustainExtension, propose_sustain_extensions, SUSTAIN_RECOVERY_ANNOTATION_KIND
+from quantization.onset_refinement import (
+    OnsetRefinement, refine_note_onsets, ONSET_REFINEMENT_ANNOTATION_KIND,
+)
+from quantization.pitch_wobble_collapse import (
+    WobbleGroup, find_wobble_groups, PITCH_WOBBLE_ANNOTATION_KIND,
+)
 from quantization.micro_note_purge import (
-    LegitimacyVerdict, evaluate_legitimacy, evaluate_legitimacy_batch,
+    LegitimacyVerdict, evaluate_legitimacy,
     MICRO_NOTE_PURGE_ANNOTATION_KIND, PURGE_CANDIDATE, LEGITIMATE,
 )
 from quantization.tie_reconstruction import (
@@ -40,9 +46,14 @@ __all__ = [
     "SustainExtension",
     "propose_sustain_extensions",
     "SUSTAIN_RECOVERY_ANNOTATION_KIND",
+    "OnsetRefinement",
+    "refine_note_onsets",
+    "ONSET_REFINEMENT_ANNOTATION_KIND",
+    "WobbleGroup",
+    "find_wobble_groups",
+    "PITCH_WOBBLE_ANNOTATION_KIND",
     "LegitimacyVerdict",
     "evaluate_legitimacy",
-    "evaluate_legitimacy_batch",
     "MICRO_NOTE_PURGE_ANNOTATION_KIND",
     "PURGE_CANDIDATE",
     "LEGITIMATE",

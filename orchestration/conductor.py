@@ -25,28 +25,32 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from statistics import median
+from typing import Dict, List, Optional, Tuple, Union
 
 from audio_engine import AudioEngine, AudioTrack
 from core import Annotation, AnnotationStore, MusicBox, MusicalFindingsMap, Note, Provenance, Separation, StemType
+from core import TempoMeter
 from separation_engine import separate
 from separation_engine import merge_harmonic_stems as _merge_harmonic_stems
 from pitch_engine import (
     transcribe_basic_pitch, transcribe_basic_pitch_with_posteriorgram,
-    transcribe_crepe_bass, BASIC_PITCH_SAMPLE_RATE,
+    transcribe_crepe_bass, BASIC_PITCH_SAMPLE_RATE, continuous_f0, make_f0_sampler,
 )
 from instrument_attribution import resolve_instrument_identity
-from key_intelligence import analyze_key, key_fit, KEY_FIT_ANNOTATION_KIND
+from key_intelligence import analyze_key, key_fit, KEY_FIT_ANNOTATION_KIND, KeyResult
 from rhythm_engine import (
     run_librosa_tempo, run_madmom_tempo, run_note_onset_tempo_witness, run_lattice_witness,
     run_pulse_field, estimate_groove, compute_phase_deltas, detect_drums,
     build_phase_locked_grid, estimate_time_signature, sample_beat_accents,
     fft_meter_candidate, resolve_denominator, detect_onset_candidates,
 )
-from epistemic import resolve_tempo, resolve_meter
+from epistemic import resolve_tempo, resolve_meter, TempoResolution, MeterResolution
 from quantization import (
     build_lattice, infer_duration, QUANTIZATION_ANNOTATION_KIND,
     propose_sustain_extensions, SUSTAIN_RECOVERY_ANNOTATION_KIND,
+    refine_note_onsets, ONSET_REFINEMENT_ANNOTATION_KIND,
+    find_wobble_groups, PITCH_WOBBLE_ANNOTATION_KIND,
     evaluate_legitimacy, MICRO_NOTE_PURGE_ANNOTATION_KIND, PURGE_CANDIDATE,
     find_tie_candidates, TIE_RECONSTRUCTION_ANNOTATION_KIND,
     build_trouble_map, notation_quantize_note, NOTATION_TIMING_ANNOTATION_KIND,
@@ -88,6 +92,12 @@ class PipelineResult:
     tempo_contention: Optional[dict] = None
     meter_contention: Optional[dict] = None
     total_notes_exported: int = 0
+    # Both are annotation-only passes: they change what the engraver WRITES,
+    # never how many notes exist. Surfaced here so a run says out loud how
+    # much they actually did - a pass that silently does nothing is the
+    # failure mode these counters exist to make impossible.
+    onset_refined_count: int = 0
+    wobble_group_count: int = 0
     elapsed_seconds: float = 0.0
     findings: Optional[MusicalFindingsMap] = None
 
@@ -102,6 +112,9 @@ def transcribe_file(
         drop_purge_candidates: bool = False,
         merge_harmonic_stems: bool = True,
         separation_seed: Optional[int] = 0,
+        guided_tempo_bpm: Optional[float] = None,
+        guided_time_signature: Optional[Tuple[int, int]] = None,
+        guided_key: Optional[str] = None,
 ) -> PipelineResult:
     start_time = time.time()
     audio_path = str(audio_path)
@@ -170,15 +183,29 @@ def transcribe_file(
     # mix - a chord/harmony fact needs every instrument's contribution,
     # not one isolated stem's. Independent of everything else (no
     # tempo/pitch dependency), so it can run this early.
-    key_result = analyze_key(engine, master_track)
-    findings.key = key_result.key
-    findings.key_confidence = key_result.confidence
-    music_box.log_decision(
-        stage_name="key_intelligence", decision_type="key_detected",
-        before_state={}, after_state={"key": key_result.key, "confidence": key_result.confidence},
-        reasoning=f"Key resolved to {key_result.key} (confidence {key_result.confidence:.2f})",
-        reversible=False,
-    )
+    if guided_key is not None:
+        # §2.7 "guided means guided": the user's key is a hard lock at
+        # confidence 1.0. analyze_key is skipped entirely, not blended -
+        # a guided value the witnesses could still outvote is not guided.
+        key_result = KeyResult(key=guided_key, confidence=1.0)
+        findings.key = key_result.key
+        findings.key_confidence = key_result.confidence
+        music_box.log_decision(
+            stage_name="key_intelligence", decision_type="key_guided",
+            before_state={}, after_state={"key": key_result.key, "guided": True},
+            reasoning=f"Key HARD-LOCKED to user-supplied {key_result.key} (guided mode; "
+                      f"detection skipped, §2.7).", reversible=False,
+        )
+    else:
+        key_result = analyze_key(engine, master_track)
+        findings.key = key_result.key
+        findings.key_confidence = key_result.confidence
+        music_box.log_decision(
+            stage_name="key_intelligence", decision_type="key_detected",
+            before_state={}, after_state={"key": key_result.key, "confidence": key_result.confidence},
+            reasoning=f"Key resolved to {key_result.key} (confidence {key_result.confidence:.2f})",
+            reversible=False,
+        )
 
     all_notes: List[Note] = []
     pitched_notes: List[Note] = []
@@ -198,6 +225,7 @@ def transcribe_file(
         )
 
     sustain_extended_count = 0
+    onset_refined_count = 0
     stem_tracks_by_type: Dict[StemType, AudioTrack] = {}
     anechoic_reports: Dict[StemType, AnechoicReport] = {}
     for stem in _PITCHED_STEMS:
@@ -217,6 +245,38 @@ def transcribe_file(
         # Written as an Annotation; Scribe Engraver decides whether to
         # read it (opt-in via use_quantized_timing, same law as
         # quantization's snapped timing).
+        # OnsetRefinement: correct WHERE a note began, using this stem's own
+        # transients. Basic Pitch fires on an onset-probability threshold
+        # crossing, which lands later the more slowly an instrument speaks -
+        # so vocals/guitar/piano drift late while drums (a real transient
+        # detector) and bass (two witnesses, fast attack) land right. The
+        # dual-witness machinery for this already existed in rhythm_engine
+        # and was wired to nothing. Annotation-only; Note.start_ms stands.
+        onset_refinements = refine_note_onsets(engine, stem_track, stem_notes)
+        for ref in onset_refinements:
+            annotations.add(Annotation(
+                note_id=ref.note_id, kind=ONSET_REFINEMENT_ANNOTATION_KIND,
+                value={"start_ms": ref.refined_start_ms,
+                       "shift_ms": ref.shift_ms,
+                       "disagreement": ref.disagreement},
+                source=Provenance.RITORNELLO, confidence=ref.confidence,
+            ))
+        onset_refined_count += len(onset_refinements)
+        if onset_refinements:
+            shifts = [r.shift_ms for r in onset_refinements]
+            music_box.log_decision(
+                stage_name="quantization", decision_type="onsets_refined",
+                before_state={"stem": stem.value, "notes": len(stem_notes)},
+                after_state={"refined": len(onset_refinements),
+                             "median_shift_ms": round(float(median(shifts)), 1),
+                             "earlier": sum(1 for s in shifts if s < 0),
+                             "later": sum(1 for s in shifts if s > 0)},
+                reasoning="Resolved Basic Pitch's onsets against this stem's own "
+                          "librosa-backtracked + madmom transients. Negative shift = "
+                          "the attack was earlier than the threshold crossing.",
+                reversible=True,
+            )
+
         stem_samples = engine.view(stem_track, BASIC_PITCH_SAMPLE_RATE).samples
         extensions = propose_sustain_extensions(stem_notes, stem_samples, BASIC_PITCH_SAMPLE_RATE, posteriorgram)
         for ext in extensions:
@@ -260,56 +320,120 @@ def transcribe_file(
         reversible=False,
     )
 
-    # Rhythm Engine: FOUR independent tempo witnesses from the full
-    # original track + the pitched notes just detected. Each audio-only
-    # witness is already octave-corrected internally (tempo_witness.py).
-    librosa_witness = run_librosa_tempo(engine, master_track)
-    madmom_witness = run_madmom_tempo(engine, master_track)
-    note_onset_witness = run_note_onset_tempo_witness(pitched_notes)
-    lattice_witness, lattice = run_lattice_witness(engine, master_track)
-
-    tempo_witnesses = [librosa_witness, madmom_witness, note_onset_witness]
-    if lattice_witness is not None:
-        tempo_witnesses.append(lattice_witness)
-    tempo_resolution = resolve_tempo(tempo_witnesses)
-
-    # ratio_family (binary/ternary/swing/...) is real per-track evidence
-    # the lattice search already computed - it decides simple vs compound
-    # for a 6/9/12-beat bar, not the numerator alone (see meter.py).
-    ratio_family = lattice.ratio_family if lattice is not None else None
-
-    # ONE canonical beat grid anchored to the RESOLVED tempo, not each
-    # witness's own independently-tracked grid - each witness's own
-    # tempo error accumulates into phase drift fast enough to corrupt
-    # exactly the longer bar lengths (6/4 in particular) a meter test
-    # cares about most (see meter.py's module docstring for the math).
+    # Onsets feed both the guided grid (phase-lock at the user's tempo) and
+    # the detected-meter path below; computed once, and cheap - this is
+    # onset detection, NOT tempo estimation.
     onset_candidates = detect_onset_candidates(engine, master_track)
-    phase_locked_grid = build_phase_locked_grid(
-        tempo_resolution.tempo_meter.tempo_bpm,
-        onset_candidates.combined_ms,
-        master_track.duration_seconds * 1000.0,
-    )
+    duration_ms = master_track.duration_seconds * 1000.0
 
-    meter_candidates = []
-    if phase_locked_grid:
-        meter_candidates.append(
-            estimate_time_signature(engine, master_track, phase_locked_grid, ratio_family=ratio_family)
+    if guided_tempo_bpm is not None:
+        # §2.7 "guided means guided": guided mode does NOT run the tempo
+        # witnesses at all. The user supplied the tempo, so the pipeline
+        # spends zero cycles trying to re-derive it - this is "do not
+        # compute," not "compute then override." (madmom, librosa, the
+        # note-onset witness, and the ReverseGeoCrypt lattice search are all
+        # skipped.) The one input the user did NOT give is PHASE - where
+        # beat 1 actually falls - so that alone is solved, from onsets. That
+        # is a small, well-conditioned problem, and it is not tempo
+        # detection: without it there is no way to place a barline.
+        tempo_witnesses: List = []
+        lattice = None
+        ratio_family = None
+        ts_num, ts_den = guided_time_signature if guided_time_signature is not None else (4, 4)
+        guided_grid = build_phase_locked_grid(guided_tempo_bpm, onset_candidates.combined_ms, duration_ms)
+        guided_downbeats = tuple(guided_grid[i] for i in range(0, len(guided_grid), ts_num)) \
+            if guided_grid else ()
+        guided_tm = TempoMeter(
+            tempo_bpm=guided_tempo_bpm, confidence=1.0,
+            time_signature_numerator=ts_num, time_signature_denominator=ts_den,
+            beat_times_ms=tuple(guided_grid), downbeat_times_ms=guided_downbeats,
+            source=Provenance.GUIDED, is_guided=True,
         )
-        # Independent second method against the SAME grid: spectral
-        # periodicity of the beat-accent sequence itself, rather than
-        # only the downbeat-salience heuristic - genuine corroboration,
-        # not three copies of the same test on different data.
-        beat_accents = sample_beat_accents(engine, master_track, phase_locked_grid)
-        fft_candidate = fft_meter_candidate(beat_accents)
-        if fft_candidate is not None:
-            fft_numerator, fft_power = fft_candidate
-            meter_candidates.append(
-                (fft_numerator, resolve_denominator(fft_numerator, ratio_family), fft_power)
-            )
+        tempo_resolution = TempoResolution(tempo_meter=guided_tm, contention=None)
+        music_box.log_decision(
+            stage_name="rhythm_engine", decision_type="tempo_guided",
+            before_state={"witnesses_run": 0},
+            after_state={"tempo_bpm": guided_tempo_bpm, "beats": len(guided_grid),
+                         "phase_ms": round(guided_grid[0], 1) if guided_grid else 0.0},
+            reasoning=f"Tempo HARD-LOCKED to user-supplied {guided_tempo_bpm}bpm (guided mode, "
+                      f"§2.7). Tempo witnesses SKIPPED ENTIRELY - not computed, not arbitrated; "
+                      f"only beat PHASE was solved against onsets.",
+            reversible=False,
+        )
+    else:
+        # Rhythm Engine: FOUR independent tempo witnesses from the full
+        # original track + the pitched notes just detected. Each audio-only
+        # witness is already octave-corrected internally (tempo_witness.py).
+        librosa_witness = run_librosa_tempo(engine, master_track)
+        madmom_witness = run_madmom_tempo(engine, master_track)
+        note_onset_witness = run_note_onset_tempo_witness(pitched_notes)
 
-    if not meter_candidates:
-        meter_candidates.append((4, 4, 0.3))
-    meter_resolution = resolve_meter(meter_candidates)
+        # NOTE on Anchor (rhythm_engine.lattice_witness): kick attacks are the
+        # natural anchor set, and the lattice's _anchor_alignment machinery is
+        # ready for them - but feeding them here was MEASURED to be a net
+        # regression and deliberately NOT done. Anchoring made the lattice a
+        # more confident witness, which let it survive the referee's #270
+        # exclusion filter and drag the weighted tempo UP toward the note-onset
+        # witness's known ~19%-high reading (#271): Hopeful 148->153.8,
+        # No Pasaran 132->136.4, both wrong, on 2026-07-20. Anchors belong in a
+        # place that consumes the lattice DIRECTLY, not the tempo vote. Dormant.
+        lattice_witness, lattice = run_lattice_witness(engine, master_track)
+
+        tempo_witnesses = [librosa_witness, madmom_witness, note_onset_witness]
+        if lattice_witness is not None:
+            tempo_witnesses.append(lattice_witness)
+
+        # ratio_family (binary/ternary/swing/...) is real per-track evidence
+        # the lattice search already computed - it decides simple vs compound
+        # for a 6/9/12-beat bar, not the numerator alone (see meter.py).
+        ratio_family = lattice.ratio_family if lattice is not None else None
+
+        tempo_resolution = resolve_tempo(tempo_witnesses)
+
+    if guided_time_signature is not None:
+        # Meter is the user's, at confidence 1.0 - no estimation, no vote.
+        g_num, g_den = guided_time_signature
+        meter_candidates = [(g_num, g_den, 1.0)]  # the "candidate" was the lock (for logging below)
+        meter_resolution = MeterResolution(numerator=g_num, denominator=g_den,
+                                           confidence=1.0, contention=None)
+        music_box.log_decision(
+            stage_name="rhythm_engine", decision_type="meter_guided",
+            before_state={}, after_state={"time_signature": f"{g_num}/{g_den}"},
+            reasoning=f"Meter HARD-LOCKED to user-supplied {g_num}/{g_den} (guided mode, §2.7).",
+            reversible=False,
+        )
+    else:
+        # ONE canonical beat grid anchored to the RESOLVED tempo, not each
+        # witness's own independently-tracked grid - each witness's own
+        # tempo error accumulates into phase drift fast enough to corrupt
+        # exactly the longer bar lengths (6/4 in particular) a meter test
+        # cares about most (see meter.py's module docstring for the math).
+        phase_locked_grid = build_phase_locked_grid(
+            tempo_resolution.tempo_meter.tempo_bpm,
+            onset_candidates.combined_ms,
+            duration_ms,
+        )
+
+        meter_candidates = []
+        if phase_locked_grid:
+            meter_candidates.append(
+                estimate_time_signature(engine, master_track, phase_locked_grid, ratio_family=ratio_family)
+            )
+            # Independent second method against the SAME grid: spectral
+            # periodicity of the beat-accent sequence itself, rather than
+            # only the downbeat-salience heuristic - genuine corroboration,
+            # not three copies of the same test on different data.
+            beat_accents = sample_beat_accents(engine, master_track, phase_locked_grid)
+            fft_candidate = fft_meter_candidate(beat_accents)
+            if fft_candidate is not None:
+                fft_numerator, fft_power = fft_candidate
+                meter_candidates.append(
+                    (fft_numerator, resolve_denominator(fft_numerator, ratio_family), fft_power)
+                )
+
+        if not meter_candidates:
+            meter_candidates.append((4, 4, 0.3))
+        meter_resolution = resolve_meter(meter_candidates)
 
     swing_ratio, groove_confidence = estimate_groove(engine, master_track, tempo_resolution.tempo_meter.beat_times_ms)
 
@@ -335,15 +459,18 @@ def transcribe_file(
     findings.swing_ratio = swing_ratio
     findings.groove_confidence = groove_confidence
 
-    music_box.log_decision(
-        stage_name="epistemic", decision_type="tempo_resolved",
-        before_state={"witness_count": len(tempo_witnesses),
-                      "raw_bpms": [w.tempo_bpm for w in tempo_witnesses]},
-        after_state={"resolved_bpm": tempo_resolution.tempo_meter.tempo_bpm,
-                     "contention": tempo_resolution.contention is not None},
-        reasoning=f"Tempo resolved to {tempo_resolution.tempo_meter.tempo_bpm:.1f}bpm "
-                  f"across {len(tempo_witnesses)} witnesses", reversible=False,
-    )
+    if guided_tempo_bpm is None:
+        # (guided mode logs its own tempo_guided decision above; there are
+        # no witnesses to report here)
+        music_box.log_decision(
+            stage_name="epistemic", decision_type="tempo_resolved",
+            before_state={"witness_count": len(tempo_witnesses),
+                          "raw_bpms": [w.tempo_bpm for w in tempo_witnesses]},
+            after_state={"resolved_bpm": tempo_resolution.tempo_meter.tempo_bpm,
+                         "contention": tempo_resolution.contention is not None},
+            reasoning=f"Tempo resolved to {tempo_resolution.tempo_meter.tempo_bpm:.1f}bpm "
+                      f"across {len(tempo_witnesses)} witnesses", reversible=False,
+        )
     music_box.log_decision(
         stage_name="epistemic", decision_type="meter_resolved",
         before_state={"candidates": meter_candidates},
@@ -606,6 +733,60 @@ def transcribe_file(
         reversible=False,
     )
 
+    # PitchWobbleCollapse - VOCALS ONLY, and only with CREPE's continuous f0.
+    #
+    # The problem is specific: Basic Pitch's note posteriorgram is an 88-bin,
+    # one-bin-per-semitone grid. A singer sustaining a pitch that genuinely
+    # sits BETWEEN two semitones (a blues neutral third, a scoop settling shy
+    # of the target) has no home bin, so the model flickers between the two it
+    # straddles - emitting a stutter of short near-pitch fragments that are
+    # symbolically indistinguishable from a fast real chromatic figure.
+    #
+    # Gate 4 is what makes this safe, and it is why 5.6.1's version was not:
+    # only a NON-quantized pitch reader can tell "one off-grid pitch" from
+    # "two real notes," and CREPE's raw f0 is exactly that. Without the
+    # sampler find_wobble_groups() returns nothing at all - structural
+    # plausibility alone is deliberately not sufficient evidence.
+    #
+    # Annotation-only. The notes are not merged, and nothing downstream acts
+    # on this yet: this run is to see how many groups it actually finds and
+    # how tight their pitch spreads are before deciding whether to collapse.
+    wobble_group_count = 0
+    vocals_track = stem_tracks_by_type.get(StemType.VOCALS)
+    vocals_notes = notes_by_stem.get(StemType.VOCALS, [])
+    if vocals_track is not None and vocals_notes:
+        times_ms, freq_hz = continuous_f0(engine, vocals_track)
+        sampler = make_f0_sampler(times_ms, freq_hz)
+        wobble_groups = find_wobble_groups(
+            vocals_notes, tempo_resolution.tempo_meter.tempo_bpm, sampler,
+        )
+        for group in wobble_groups:
+            for member_id in group.member_note_ids:
+                annotations.add(Annotation(
+                    note_id=member_id, kind=PITCH_WOBBLE_ANNOTATION_KIND,
+                    value={"anchor_note_id": group.anchor_note_id,
+                           "anchor_pitch": group.anchor_pitch,
+                           "member_note_ids": list(group.member_note_ids),
+                           "continuous_pitch_spread_semitones":
+                               group.continuous_pitch_spread_semitones,
+                           "reason": group.reason},
+                    source=Provenance.RITORNELLO,
+                ))
+            wobble_group_count += 1
+
+        voiced_frames = int((freq_hz > 0).sum())
+        music_box.log_decision(
+            stage_name="quantization", decision_type="pitch_wobble_collapse",
+            before_state={"vocals_notes": len(vocals_notes),
+                          "crepe_voiced_frames": voiced_frames},
+            after_state={"wobble_groups": wobble_group_count,
+                         "notes_in_groups": sum(len(g.member_note_ids) for g in wobble_groups)},
+            reasoning="CREPE's continuous f0 on the vocals stem confirmed which "
+                      "Basic-Pitch fragment clusters are one off-grid sustained pitch "
+                      "rather than distinct notes. Annotation only - nothing is merged.",
+            reversible=True,
+        )
+
     # TroubleMap (Ritornello Pass 7, ported): pure diagnosis of the whole
     # ensemble at once (unlike TieReconstruction, which stays within one
     # voice) - flags measures that are low-confidence and/or fragmented.
@@ -645,6 +826,8 @@ def transcribe_file(
         output_midi_path=output_midi_path,
         separation_model=separation.model_used,
         separation_seed=separation_seed,
+        onset_refined_count=onset_refined_count,
+        wobble_group_count=wobble_group_count,
         note_counts_by_stem=note_counts,
         crepe_bass_note_count=crepe_bass_count,
         tempo_bpm=tempo_resolution.tempo_meter.tempo_bpm,

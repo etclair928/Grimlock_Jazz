@@ -8,7 +8,7 @@
 
 from instrument_attribution.fingerprint import TimbreFingerprint, fingerprint_notes
 from instrument_attribution.voice_continuity import VoiceLine, stream_into_lines
-from instrument_attribution.resolve import resolve_instrument_identity, STEM_FAMILY
+from instrument_attribution.resolve import resolve_instrument_identity, STEM_FAMILY, VOICE_ANNOTATION_KIND
 
 __all__ = [
     "TimbreFingerprint",
@@ -17,4 +17,5 @@ __all__ = [
     "stream_into_lines",
     "resolve_instrument_identity",
     "STEM_FAMILY",
+    "VOICE_ANNOTATION_KIND",
 ]

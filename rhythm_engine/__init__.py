@@ -19,8 +19,9 @@ from rhythm_engine.groove import estimate_groove
 from rhythm_engine.groove_field import GrooveType, PhaseDeltaResult, compute_phase_deltas
 from rhythm_engine.meter import (
     build_phase_locked_grid, estimate_time_signature, sample_beat_accents,
-    fft_meter_candidate, resolve_denominator,
+    fft_meter_candidate, resolve_denominator, PickupResult, detect_pickup,
 )
+from rhythm_engine.tempo_drift import DriftKind, TempoDriftResult, classify_drift, local_tempo_curve
 from rhythm_engine.drums import detect_drums, GM_PITCH
 
 __all__ = [
@@ -45,6 +46,12 @@ __all__ = [
     "sample_beat_accents",
     "fft_meter_candidate",
     "resolve_denominator",
+    "PickupResult",
+    "detect_pickup",
+    "DriftKind",
+    "TempoDriftResult",
+    "classify_drift",
+    "local_tempo_curve",
     "detect_drums",
     "GM_PITCH",
 ]

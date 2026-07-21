@@ -53,6 +53,7 @@ from instrument_attribution.fingerprint import fingerprint_notes
 from instrument_attribution.voice_continuity import VoiceLine, stream_into_lines
 
 ANNOTATION_KIND = "instrument_family"
+VOICE_ANNOTATION_KIND = "voice"
 
 # Stems Separation Engine already resolved identity for at the audio
 # layer - Instrument Attribution trusts that, it doesn't re-derive it.
@@ -129,6 +130,26 @@ def resolve_instrument_identity(
     line grouping itself, e.g. Rhythm Engine's phrase-level reasoning)."""
     lines = stream_into_lines(notes)
 
+    # Persist the voice membership itself, not just the family it resolves
+    # to. stream_into_lines already separated these notes into monophonic
+    # threads (line_id); until now that separation was used only to pick a
+    # family and then discarded, so the engraver could group by family
+    # alone - collapsing every voice of one instrument onto one staff (the
+    # polyphony "mush"). Writing line_id as a `voice` annotation is the one
+    # missing edge the NotationScore layer needs to put voices on separate
+    # staves. Written here, before family resolution, so it exists for every
+    # note regardless of which family branch runs below.
+    for line in lines:
+        for note in line.notes:
+            annotations.add(Annotation(
+                note_id=note.id,
+                kind=VOICE_ANNOTATION_KIND,
+                value=line.line_id,
+                source=Provenance.VOICE_CONTINUITY,
+                confidence=1.0,
+                contested=False,
+            ))
+
     known_family = STEM_FAMILY.get(stem)
     if known_family is not None:
         for line in lines:
@@ -176,4 +197,4 @@ def resolve_instrument_identity(
     return lines
 
 
-__all__ = ["resolve_instrument_identity", "STEM_FAMILY", "ANNOTATION_KIND"]
+__all__ = ["resolve_instrument_identity", "STEM_FAMILY", "ANNOTATION_KIND", "VOICE_ANNOTATION_KIND"]
