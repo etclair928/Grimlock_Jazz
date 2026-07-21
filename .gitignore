@@ -11,8 +11,10 @@ __pycache__/
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
 
-# Generated transcription output and ad-hoc debug artifacts
-output/
+# Generated transcription output and ad-hoc debug artifacts.
+# NOTE: `output/` is a CODE MODULE here (the Scribe Engraver), NOT a
+# generated-output dir - do not ignore it. Jazz writes its MIDI/MusicXML
+# to transcriptions/, which is ignored below.
 debug/
 transcriptions/
 
