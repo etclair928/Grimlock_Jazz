@@ -18,6 +18,21 @@ import tempfile
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
+# scipy >= 1.13 removed the top-level scipy.signal.gaussian re-export (it lives
+# in scipy.signal.windows). Basic Pitch 0.3.0's note_creation.get_pitch_bends
+# still calls scipy.signal.gaussian, so on modern scipy every predict() raises
+# "module 'scipy.signal' has no attribute 'gaussian'" and Basic Pitch - which
+# in 6.0 IS the transcription - contributes nothing. scipy can't be downgraded
+# (audio-separator/madmom pin >=1.13); restore the alias (pure re-export, so
+# behaviour-identical).
+try:  # pragma: no cover
+    import scipy.signal as _sps
+    if not hasattr(_sps, "gaussian"):
+        from scipy.signal.windows import gaussian as _gaussian
+        _sps.gaussian = _gaussian
+except Exception:
+    pass
+
 import numpy as np
 import soundfile as sf
 
