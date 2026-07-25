@@ -144,9 +144,18 @@ _GM_PROGRAM: Dict[str, int] = {
     "vocals": 52,           # Choir Aahs
     "guitar": 27,           # Electric Guitar (clean)
     "piano": 0,             # Acoustic Grand Piano
-    "warm_sustained": 48,   # String Ensemble 1
-    "mid_body": 25,         # Acoustic Guitar (steel) - mid-centroid catch-all
-    "bright_lead": 56,      # Trumpet - bright/reed-like catch-all
+    # The three "other"-stem brightness buckets map to a brass/horn tiering,
+    # ordered dark->bright to match the centroid tertiles resolve.py sorts
+    # them into (warm=lowest centroid ... bright=highest). This is a GENRE
+    # GUESS for the patch a bucket plays back as - exactly as the previous
+    # String Ensemble/Guitar/Trumpet mapping was, just aimed at brass-heavy
+    # material instead of strings. It does NOT come from real brass-vs-string
+    # timbre discrimination (fingerprint.py's bandwidth/ZCR/MFCC are still
+    # unused); when that lands, this table becomes the family->GM lookup keyed
+    # on a real classification rather than a fixed brightness->instrument guess.
+    "warm_sustained": 60,   # French Horn - warmest/darkest brass
+    "mid_body": 57,         # Trombone - mid brass
+    "bright_lead": 56,      # Trumpet - brightest brass
 }
 _DEFAULT_PROGRAM = 0
 _DRUM_FAMILY = "drums"
