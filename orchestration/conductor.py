@@ -61,6 +61,7 @@ from acoustic_witness import (
     audit_note, HarmonicVerdict, HARMONIC_LEGITIMACY_ANNOTATION_KIND,
     evaluate_stem_support, NOTE_SUPPORT_ANNOTATION_KIND, NOTE_SUPPORT_SAMPLE_RATE, UNSUPPORTED,
 )
+from check import run_check
 from output import engrave
 from model_registry import unload_demucs
 
@@ -797,6 +798,29 @@ def transcribe_file(
         before_state={}, after_state={"flagged_measures": len(findings.trouble_measures)},
         reasoning=f"TroubleMap flagged {len(findings.trouble_measures)} measure(s) as "
                   f"low-confidence and/or fragmented (diagnosis only)",
+        reversible=False,
+    )
+
+    # Check (form/self-similarity, annotation-only, top of the ladder):
+    # detect repeated SECTIONS + MOTIFS on the master, label every note
+    # with its section, and score how consistently each repeated section
+    # is transcribed. Evidence only - notes/timing are untouched; the
+    # scores flag where the same idea was written inconsistently so a
+    # later reconciliation (or the engraver) can prefer the consistent
+    # reading. Soft by design (real music varies).
+    check_result = run_check(engine, master_track, all_notes, annotations)
+    music_box.log_decision(
+        stage_name="check", decision_type="form_self_similarity",
+        before_state={}, after_state={
+            "sections": len(check_result.sections),
+            "repeated_sections": check_result.repeat_groups,
+            "group_consistency": {k: round(v, 2) for k, v in check_result.group_consistency.items()},
+            "motifs": len(check_result.motifs),
+        },
+        reasoning=f"Check found {len(check_result.sections)} sections "
+                  f"({sum(1 for v in check_result.repeat_groups.values() if v >= 2)} recurring) and "
+                  f"{len(check_result.motifs)} recurring motifs; labeled {check_result.notes_labeled} "
+                  f"notes by section (annotation-only - repeats flagged for consistent transcription)",
         reversible=False,
     )
 

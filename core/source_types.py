@@ -50,6 +50,11 @@ class Provenance(str, Enum):
     # key_intelligence/ module docstring)
     KEY_INTELLIGENCE = "key_intelligence"
 
+    # Check - form/motif self-similarity layer (annotation-only; detects
+    # repeated sections + motifs and flags where repeats disagree so the
+    # same idea can be transcribed consistently - see check/ module docstring)
+    CHECK = "check"
+
     # Scalar-contradiction referee (§7 Epistemic layer - not a note-level gate)
     CONSENSUS = "consensus"
 
