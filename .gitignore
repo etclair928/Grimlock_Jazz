@@ -23,6 +23,14 @@ transcriptions/
 # that Demucs is seeded (separation_seed on PipelineResult).
 stems/
 
+# Input/ - the local TEST LIBRARY (tools/build_stem_cache.py): source songs
+# plus their pre-separated stems, kept out of git. It's a convenience cache
+# for stem-level analysis, not source - large audio, reproducible from the
+# originals, and the pipeline never reads it (it always separates fresh).
+# The stems inside are already covered by the `stems/` rule above; this also
+# keeps the source audio and folder structure out of commits and pulls.
+Input/
+
 # Large full-codebase context dumps (not source, regenerated as needed)
 grimlock_5.4.txt
 grimlock_symphony5_5.txt
