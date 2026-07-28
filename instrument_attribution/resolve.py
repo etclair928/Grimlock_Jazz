@@ -36,9 +36,34 @@
 # already uses for its significance test, applied here to timbre
 # instead of rhythm. This does NOT touch voice_continuity.py - lines
 # are still built the same way; only how a resolved line gets LABELED
-# changes. It also does not attempt genuine multi-feature timbre
-# discrimination (see fingerprint.py's unused bandwidth/ZCR/MFCC
-# fields) - that's a separate, bigger step, deliberately deferred.
+# changes.
+#
+# MEASURED NEGATIVE RESULT (2026-07-27) - WHY THIS STAYS COARSE.
+# The obvious next step is "real" family ID (brass vs piano vs strings
+# vs EP) from fingerprint.py's bandwidth/ZCR/MFCC. We measured whether
+# blind per-note DSP can actually do that, against the labeled test
+# library (Gospel=brass; Hopeful/YouSay=piano/EP; NoPasaran=guitar+piano),
+# across FIVE features: spectral centroid, spectral bandwidth, within-note
+# sustain ratio, absolute onset->peak attack time, and log-RMS decay slope.
+# It cannot separate the sustained families. Brass's attack (med 58ms,
+# IQR 25-113) overlaps piano's (43-49ms, IQR 20-96) completely; its decay
+# slope (-0.15) barely differs from piano's (-0.20..-0.38); and its
+# centroid (2145) sits DEAD BETWEEN the two pianos' (2121, 2712). The only
+# clean separation is brightness/darkness (guitar alone at centroid ~820).
+# Reasons: Basic Pitch trims each note to its sounding portion (erasing the
+# piano's tell-tale decay tail), and polyphonic stems contaminate every
+# note window with overlapping/pedalled notes. Fitting a multi-feature
+# boundary on our ONE brass example would be overfitting, and shipping a
+# confident brass/piano guess is exactly the "emit a confident guess, fail
+# silently" reflex the 6.0 bible exists to kill. So we classify ONLY the
+# brightness we can honestly measure, into deliberately coarse acoustic-
+# CHARACTER buckets (not instrument names), and the engraver renders them
+# as neutral keyboards, not brass. Genuine family ID would need reference-
+# template matching (k-NN against known-instrument templates) - a separate,
+# bigger build, not blind DSP. NOTE the same wall blocks a DSP "phantom
+# vocals" guard (guitar/trumpet leaked into the vocals stem reads like a
+# voice); empty/silent-stem phantoms are already handled upstream by the
+# AnechoicMa note-support audit.
 # =================================================================
 
 from __future__ import annotations

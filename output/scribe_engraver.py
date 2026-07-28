@@ -144,18 +144,27 @@ _GM_PROGRAM: Dict[str, int] = {
     "vocals": 52,           # Choir Aahs
     "guitar": 27,           # Electric Guitar (clean)
     "piano": 0,             # Acoustic Grand Piano
-    # The three "other"-stem brightness buckets map to a brass/horn tiering,
-    # ordered dark->bright to match the centroid tertiles resolve.py sorts
-    # them into (warm=lowest centroid ... bright=highest). This is a GENRE
-    # GUESS for the patch a bucket plays back as - exactly as the previous
-    # String Ensemble/Guitar/Trumpet mapping was, just aimed at brass-heavy
-    # material instead of strings. It does NOT come from real brass-vs-string
-    # timbre discrimination (fingerprint.py's bandwidth/ZCR/MFCC are still
-    # unused); when that lands, this table becomes the family->GM lookup keyed
-    # on a real classification rather than a fixed brightness->instrument guess.
-    "warm_sustained": 60,   # French Horn - warmest/darkest brass
-    "mid_body": 57,         # Trombone - mid brass
-    "bright_lead": 56,      # Trumpet - brightest brass
+    # The three "other"-stem brightness buckets. These are NEUTRAL KEYBOARD
+    # patches ordered dark->bright to match the centroid tertiles resolve.py
+    # sorts lines into (warm=lowest centroid ... bright=highest).
+    #
+    # They used to map to a brass tiering (French Horn/Trombone/Trumpet),
+    # which is why non-brass songs "came out all brass": that was a genre
+    # guess, not measured. We then MEASURED (2026-07-27, across the labeled
+    # test library: Gospel=brass, Hopeful/YouSay/NoPasaran=piano/EP/guitar)
+    # whether blind per-note DSP can actually tell brass from piano, testing
+    # spectral centroid, bandwidth, sustain ratio, absolute attack time, and
+    # decay slope. It CANNOT: brass's attack (~58ms) overlaps piano's (~45ms)
+    # completely, its decay is only marginally slower, and its centroid sits
+    # dead between the two pianos'. The ONE feature that separates cleanly is
+    # brightness/darkness (guitar alone at centroid ~820). So we render only
+    # what we can honestly measure - brightness - as a neutral keyboard of
+    # matching brightness, and we DON'T claim a brass/string/wind family we
+    # can't detect. See resolve.py's header for the full negative result;
+    # genuine family ID would need reference-template matching, not blind DSP.
+    "warm_sustained": 4,    # Electric Piano 1 - warm, neutral keyboard
+    "mid_body": 0,          # Acoustic Grand Piano - the neutral default
+    "bright_lead": 1,       # Bright Acoustic Piano - bright, neutral keyboard
 }
 _DEFAULT_PROGRAM = 0
 _DRUM_FAMILY = "drums"
