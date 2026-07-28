@@ -26,6 +26,7 @@ from quantization import (
     MICRO_NOTE_PURGE_ANNOTATION_KIND, PURGE_CANDIDATE,
     NOTATION_TIMING_ANNOTATION_KIND,
     ONSET_REFINEMENT_ANNOTATION_KIND,
+    CONSOLIDATION_ANNOTATION_KIND,
 )
 from acoustic_witness import HARMONIC_LEGITIMACY_ANNOTATION_KIND, NOTE_SUPPORT_ANNOTATION_KIND, UNSUPPORTED
 
@@ -248,6 +249,7 @@ def engrave(
         music_box: Optional[MusicBox] = None,
         use_quantized_timing: bool = False,
         use_notation_timing: bool = False,
+        use_consolidated_timing: bool = False,
         drop_purge_candidates: bool = False,
         tempo_bpm: Optional[float] = None,
         time_signature: Optional[Tuple[int, int]] = None,
@@ -344,6 +346,15 @@ def engrave(
             if support is not None and support.get("verdict") == UNSUPPORTED:
                 continue
 
+        # Consolidation (opt-in): a same-pitch fragment absorbed into an
+        # earlier note is not written at all; the primary it belongs to
+        # carries the merged span (its end is extended below). Default off,
+        # so raw output is byte-for-byte unchanged.
+        consolidation = (annotations.latest_value(note.id, CONSOLIDATION_ANNOTATION_KIND)
+                         if use_consolidated_timing else None)
+        if consolidation is not None and consolidation.get("role") == "absorbed":
+            continue
+
         family = _family_for_note(note, annotations)
         is_drum = family == _DRUM_FAMILY or note.stem == StemType.DRUMS
 
@@ -352,6 +363,8 @@ def engrave(
             tracks[family] = pretty_midi.Instrument(program=program, is_drum=is_drum, name=family)
 
         start_ms, end_ms = _timing_for_note(note, annotations, use_quantized_timing, use_notation_timing)
+        if consolidation is not None and consolidation.get("role") == "primary":
+            end_ms = max(end_ms, consolidation.get("end_ms", end_ms))
         tracks[family].notes.append(pretty_midi.Note(
             velocity=note.velocity,
             pitch=note.pitch,
@@ -398,6 +411,7 @@ def engrave(
                 "tracks": {name: len(inst.notes) for name, inst in tracks.items()},
                 "use_quantized_timing": use_quantized_timing,
                 "use_notation_timing": use_notation_timing,
+                "use_consolidated_timing": use_consolidated_timing,
                 "drop_purge_candidates": drop_purge_candidates,
                 "tempo_bpm": init_tempo,
                 "tempo_map_segments": tempo_map_segments,

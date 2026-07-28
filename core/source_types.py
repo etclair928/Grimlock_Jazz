@@ -40,6 +40,7 @@ class Provenance(str, Enum):
     # Presentation / quantization (annotation-only passes)
     TEMPORAL_LATTICE = "temporal_lattice"
     RITORNELLO = "ritornello"
+    CONSOLIDATION = "consolidation"   # merges Basic Pitch's fragmented same-pitch runs (note-level)
 
     # Acoustic Witness (annotation-only passes, §7-adjacent - see
     # acoustic_witness/ module docstring)

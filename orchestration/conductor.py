@@ -55,6 +55,7 @@ from quantization import (
     find_tie_candidates, TIE_RECONSTRUCTION_ANNOTATION_KIND,
     build_trouble_map, notation_quantize_note, NOTATION_TIMING_ANNOTATION_KIND,
     infer_voice_rhythm,
+    consolidate_fragments, CONSOLIDATION_ANNOTATION_KIND,
 )
 from acoustic_witness import (
     analyze_stem, AnechoicReport, ACOUSTIC_ACTIVITY_ANNOTATION_KIND,
@@ -110,6 +111,7 @@ def transcribe_file(
         device: str = "cpu",
         use_quantized_timing: bool = False,
         use_notation_timing: bool = False,
+        use_consolidated_timing: bool = False,
         drop_purge_candidates: bool = False,
         merge_harmonic_stems: bool = True,
         separation_seed: Optional[int] = 0,
@@ -824,6 +826,24 @@ def transcribe_file(
         reversible=False,
     )
 
+    # Consolidation (annotation-only, §2): glue Basic Pitch's fragmented
+    # same-pitch runs back into single sustained notes. Runs on the pitched
+    # notes only (drums are discrete hits, never sustained). Always emits its
+    # annotations; the engraver RENDERS the merged spans only under
+    # use_consolidated_timing, so default output is unchanged - this is an
+    # opt-in timeline to A/B against raw, like notation/groove timing.
+    runs_merged, fragments_absorbed = consolidate_fragments(pitched_notes, annotations)
+    music_box.log_decision(
+        stage_name="quantization", decision_type="note_consolidation",
+        before_state={"pitched_notes": len(pitched_notes)},
+        after_state={"runs_merged": runs_merged, "fragments_absorbed": fragments_absorbed,
+                     "rendered": use_consolidated_timing},
+        reasoning=f"Consolidated {fragments_absorbed} fragmented same-pitch notes into "
+                  f"{runs_merged} sustained runs (annotation-only; "
+                  f"{'rendered' if use_consolidated_timing else 'not rendered - raw timeline'})",
+        reversible=True,
+    )
+
     # beat_times_ms is the anchor witness's TRACKED beat grid - the plug
     # that used to be left disconnected: the Rhythm Engine computed real
     # beat positions and the engraver only ever received one scalar
@@ -832,6 +852,7 @@ def transcribe_file(
     # binds the file's tempo map to where the beats actually fell.
     midi = engrave(all_notes, annotations, output_midi_path, music_box=music_box,
                    use_quantized_timing=use_quantized_timing, use_notation_timing=use_notation_timing,
+                   use_consolidated_timing=use_consolidated_timing,
                    drop_purge_candidates=drop_purge_candidates,
                    tempo_bpm=tempo_resolution.tempo_meter.tempo_bpm,
                    time_signature=(meter_resolution.numerator, meter_resolution.denominator),

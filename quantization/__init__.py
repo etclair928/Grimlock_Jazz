@@ -34,6 +34,9 @@ from quantization.notation_quantizer import (
 from quantization.rhythm_inference import (
     BeatFilling, BeatRhythm, InferredNoteTiming, infer_beat, infer_voice_rhythm,
 )
+from quantization.note_consolidation import (
+    consolidate_fragments, CONSOLIDATION_ANNOTATION_KIND, DEFAULT_MERGE_GAP_MS,
+)
 
 __all__ = [
     "TemporalLattice",
@@ -72,4 +75,7 @@ __all__ = [
     "InferredNoteTiming",
     "infer_beat",
     "infer_voice_rhythm",
+    "consolidate_fragments",
+    "CONSOLIDATION_ANNOTATION_KIND",
+    "DEFAULT_MERGE_GAP_MS",
 ]
