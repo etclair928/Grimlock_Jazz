@@ -888,11 +888,13 @@ def transcribe_file(
             "repeated_sections": check_result.repeat_groups,
             "group_consistency": {k: round(v, 2) for k, v in check_result.group_consistency.items()},
             "motifs": len(check_result.motifs),
+            "drift_flagged": check_result.drift_flagged,
         },
         reasoning=f"Check found {len(check_result.sections)} sections "
                   f"({sum(1 for v in check_result.repeat_groups.values() if v >= 2)} recurring) and "
                   f"{len(check_result.motifs)} recurring motifs; labeled {check_result.notes_labeled} "
-                  f"notes by section (annotation-only - repeats flagged for consistent transcription)",
+                  f"notes by section; flagged {check_result.drift_flagged} notes in outlier repeat "
+                  f"instances as reconciliation evidence (annotation-only - note rewrite deferred)",
         reversible=False,
     )
 

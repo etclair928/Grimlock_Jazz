@@ -34,6 +34,12 @@ from check.structure import Section, Motif, detect_form, find_motifs
 SECTION_KIND = "section"
 REPEAT_GROUP_KIND = "repeat_group"
 MOTIF_KIND = "motif"
+DRIFT_KIND = "repeat_drift"
+
+# A repeat group whose instances agree at least this well is "consistent" -
+# no drift worth flagging. Below it, the instance farthest from the group's
+# consensus profile is the one the transcriber read differently.
+DRIFT_CONSISTENCY_THRESHOLD = 0.92
 
 
 @dataclass
@@ -43,6 +49,7 @@ class CheckResult:
     group_consistency: Dict[str, float]      # label -> mean pairwise pitch-class similarity (0-1)
     motifs: List[Motif]
     notes_labeled: int
+    drift_flagged: int = 0                    # notes in an outlier repeat instance (reconciliation evidence)
 
 
 def _section_of(t_ms: float, sections: List[Section]) -> Optional[Section]:
@@ -89,20 +96,44 @@ def run_check(engine, track, notes: List[Note], annotations: AnnotationStore) ->
     for s in sections:
         by_label.setdefault(s.label, []).append(s)
     group_consistency: Dict[str, float] = {}
+    drift_flagged = 0
     for label, instances in by_label.items():
         if len(instances) < 2:
             continue
-        hists = []
-        for s in instances:
-            seg_notes = [n for n in notes
-                         if s.start_ms <= n.start_ms < s.end_ms
-                         and getattr(n.stem, "value", str(n.stem)) != "drums"]
-            if seg_notes:
-                hists.append(_pitch_class_hist(seg_notes))
-        if len(hists) >= 2:
-            sims = [float(hists[i] @ hists[j])
-                    for i in range(len(hists)) for j in range(i + 1, len(hists))]
-            group_consistency[label] = float(np.mean(sims)) if sims else 0.0
+        inst_notes = [
+            [n for n in notes
+             if s.start_ms <= n.start_ms < s.end_ms
+             and getattr(n.stem, "value", str(n.stem)) != "drums"]
+            for s in instances
+        ]
+        hists = [(_pitch_class_hist(ns), ns) for ns in inst_notes if ns]
+        if len(hists) < 2:
+            continue
+        profiles = [h for h, _ in hists]
+        sims = [float(profiles[i] @ profiles[j])
+                for i in range(len(profiles)) for j in range(i + 1, len(profiles))]
+        group_consistency[label] = float(np.mean(sims)) if sims else 0.0
+
+        # Reconciliation EVIDENCE (annotation-only; the note-rewrite half stays
+        # deferred - real music varies). When a group's instances disagree,
+        # find the OUTLIER instance (lowest mean similarity to the others = the
+        # consensus reading it departs from) and flag its notes so the
+        # disagreement is localized to a specific repeat, not just a group score.
+        if group_consistency[label] < DRIFT_CONSISTENCY_THRESHOLD and len(profiles) >= 3:
+            mean_sim_to_others = [
+                float(np.mean([profiles[i] @ profiles[j] for j in range(len(profiles)) if j != i]))
+                for i in range(len(profiles))
+            ]
+            outlier = int(np.argmin(mean_sim_to_others))
+            for n in hists[outlier][1]:
+                annotations.add(Annotation(
+                    note_id=n.id, kind=DRIFT_KIND,
+                    value={"group": label, "instance": outlier,
+                           "similarity_to_consensus": round(mean_sim_to_others[outlier], 3)},
+                    source=Provenance.CHECK,
+                    confidence=float(1.0 - mean_sim_to_others[outlier]), contested=True,
+                ))
+                drift_flagged += 1
 
     # motifs, and tag participating notes (first note of each occurrence)
     motifs = find_motifs(notes)
@@ -125,7 +156,8 @@ def run_check(engine, track, notes: List[Note], annotations: AnnotationStore) ->
         group_consistency=group_consistency,
         motifs=motifs,
         notes_labeled=notes_labeled,
+        drift_flagged=drift_flagged,
     )
 
 
-__all__ = ["run_check", "CheckResult", "SECTION_KIND", "REPEAT_GROUP_KIND", "MOTIF_KIND"]
+__all__ = ["run_check", "CheckResult", "SECTION_KIND", "REPEAT_GROUP_KIND", "MOTIF_KIND", "DRIFT_KIND"]
