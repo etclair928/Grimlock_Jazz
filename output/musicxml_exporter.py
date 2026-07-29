@@ -52,18 +52,34 @@ _GM_PROGRAM: Dict[str, int] = {
 }
 
 
-def _quarter_length(duration_ms: float, tempo_bpm: float) -> float:
-    ms_per_quarter = 60000.0 / max(tempo_bpm, 1.0)
-    ql = duration_ms / ms_per_quarter
-    # snap to the 32nd-note grid; never let a real note vanish to zero
-    snapped = round(ql / _MIN_QUARTER_LENGTH) * _MIN_QUARTER_LENGTH
-    return max(_MIN_QUARTER_LENGTH, snapped)
+# Ratio families (from the ReverseGeoCrypt-style lattice witness) in which
+# tuplets are musically plausible. On binary material a "triplet" is almost
+# always a per-note rounding artifact, so the gate closes and everything snaps
+# binary regardless of any single note's rounded value.
+_TERNARY_RATIO_FAMILIES = frozenset({"ternary", "swing"})
 
 
-def _offset_quarter_length(start_ms: float, origin_ms: float, tempo_bpm: float) -> float:
+def _snap_quarter_length(ql: float, allow_triplet: bool) -> float:
+    """Snap a quarter-length to the 16th grid, or - when this note carried a
+    beat-level TRIPLET VERDICT and the piece's ratio family permits tuplets -
+    to the triplet grid. The verdict comes from rhythm_inference (decided once
+    per beat), never re-guessed here from the rounded duration: that per-note
+    guessing manufactured 3210 tuplets > 4971 noteheads on the first pass."""
+    binary = round(ql * 4.0) / 4.0        # nearest 16th
+    if allow_triplet:
+        return round(ql * 3.0) / 3.0      # nearest triplet-eighth
+    return binary
+
+
+def _quarter_length(duration_ms: float, tempo_bpm: float, allow_triplet: bool = False) -> float:
     ms_per_quarter = 60000.0 / max(tempo_bpm, 1.0)
-    ql = (start_ms - origin_ms) / ms_per_quarter
-    return max(0.0, round(ql / _MIN_QUARTER_LENGTH) * _MIN_QUARTER_LENGTH)
+    ql = _snap_quarter_length(duration_ms / ms_per_quarter, allow_triplet)
+    return max(_MIN_QUARTER_LENGTH, ql)   # never let a real note vanish to zero
+
+
+def _offset_quarter_length(start_ms: float, origin_ms: float, tempo_bpm: float, allow_triplet: bool = False) -> float:
+    ms_per_quarter = 60000.0 / max(tempo_bpm, 1.0)
+    return max(0.0, _snap_quarter_length((start_ms - origin_ms) / ms_per_quarter, allow_triplet))
 
 
 def _clef_for(mean_pitch: float):
@@ -167,9 +183,27 @@ def build_music21_score(score: NotationScore):
         default=0.0,
     )
 
+    # The gate for whether a note is written as a triplet is rhythm_inference's
+    # per-beat posterior verdict (is_tuplet) - a lattice-level decision that
+    # weighs the whole beat's onsets, NOT the exporter re-guessing from a
+    # rounded duration (that per-note guessing gave 3210 spurious triplets).
+    #
+    # The coarser ratio_family gate (ReverseGeoCrypt-style) is intentionally
+    # NOT ANDed in here: measured on the test library, the lattice witness
+    # reports `binary` for every song including the triplet-feel ones (Hopeful,
+    # Gospel, No Pasaran), so ANDing it would force every page to 0 tuplets.
+    # Strengthening ternary/swing detection is the prerequisite to using it as
+    # the gate; until then the beat-level verdict is the trustworthy signal. A
+    # ratio_family that is CONFIDENTLY ternary/swing can only ADD permission,
+    # never remove the beat-level one.
+    def _triplet(event: List[NotationNote]) -> bool:
+        return (any(n.is_tuplet for n in event)
+                or score.ratio_family in _TERNARY_RATIO_FAMILIES)
+
     def _make_element(event: List[NotationNote]):
         """A Note, or a Chord when several notes were struck together."""
-        ql = max(_quarter_length(n.duration_ms, score.tempo_bpm) for n in event)
+        allow = _triplet(event)
+        ql = max(_quarter_length(n.duration_ms, score.tempo_bpm, allow) for n in event)
         if len(event) == 1:
             el = m21note.Note(event[0].pitch)
         else:
@@ -214,7 +248,7 @@ def build_music21_score(score: NotationScore):
                 m_voice = stream.Voice(id=str(v_num))
                 for event in voice_events:
                     offset = _offset_quarter_length(
-                        min(n.start_ms for n in event), origin_ms, score.tempo_bpm)
+                        min(n.start_ms for n in event), origin_ms, score.tempo_bpm, _triplet(event))
                     m_voice.insert(offset, _make_element(event))
                 m_voice.makeRests(fillGaps=True, inPlace=True)
                 m_part.insert(0.0, m_voice)

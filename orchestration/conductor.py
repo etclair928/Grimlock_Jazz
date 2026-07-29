@@ -113,6 +113,7 @@ def transcribe_file(
         use_quantized_timing: bool = False,
         use_notation_timing: bool = False,
         use_consolidated_timing: bool = False,
+        output_musicxml_path: Optional[Union[str, Path]] = None,
         drop_purge_candidates: bool = False,
         merge_harmonic_stems: bool = True,
         separation_seed: Optional[int] = 0,
@@ -650,7 +651,7 @@ def transcribe_file(
             annotations.add(Annotation(
                 note_id=note.id, kind=NOTATION_TIMING_ANNOTATION_KIND,
                 value={"start_ms": beat_timing.notation_start_ms, "end_ms": beat_timing.notation_end_ms,
-                       "reason": beat_timing.reason},
+                       "reason": beat_timing.reason, "is_tuplet": beat_timing.is_tuplet},
                 source=Provenance.TEMPORAL_LATTICE,
             ))
             rhythm_inferred_count += 1
@@ -927,6 +928,35 @@ def transcribe_file(
                    time_signature=(meter_resolution.numerator, meter_resolution.denominator),
                    key=findings.key,
                    beat_times_ms=tempo_resolution.tempo_meter.beat_times_ms)
+
+    # Notation export (open problem #3): serialize the symbolic score in
+    # notation space directly to MusicXML - never through MIDI, which by §V's
+    # quotient argument cannot carry ties/tuplets/voices/beams. Opt-in path.
+    # Consolidation-aware (the confetti is gone before a duration is drawn)
+    # and fed the now-correct tempo/meter/grid from #2/#7. use_voices=False:
+    # one dense staff per family that the exporter voices legally, more
+    # readable than the over-fragmented per-line staves until voice
+    # separation improves.
+    if output_musicxml_path is not None:
+        from output.notation_score import build_notation_score
+        from output.musicxml_exporter import export_musicxml
+        notation_score = build_notation_score(
+            all_notes, annotations,
+            tempo_bpm=tempo_resolution.tempo_meter.tempo_bpm,
+            time_signature=(meter_resolution.numerator, meter_resolution.denominator),
+            key=findings.key, use_voices=False, use_consolidation=True,
+            ratio_family=ratio_family,
+        )
+        export_musicxml(notation_score, str(output_musicxml_path))
+        music_box.log_decision(
+            stage_name="scribe_engraver", decision_type="musicxml_written",
+            before_state={}, after_state={"output_path": str(output_musicxml_path),
+                                          "parts": len(notation_score.parts),
+                                          "notes": notation_score.total_notes},
+            reasoning=f"#3: serialized {notation_score.total_notes} notes across "
+                      f"{len(notation_score.parts)} parts to MusicXML (notation space, not MIDI).",
+            reversible=False,
+        )
 
     elapsed = time.time() - start_time
     music_box.log_decision(

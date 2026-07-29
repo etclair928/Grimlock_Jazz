@@ -27,7 +27,11 @@ from typing import Dict, List, Optional, Tuple
 from core import AnnotationStore, Note, StemType
 from instrument_attribution.resolve import ANNOTATION_KIND as FAMILY_ANNOTATION_KIND
 from instrument_attribution.resolve import VOICE_ANNOTATION_KIND
-from quantization import ONSET_REFINEMENT_ANNOTATION_KIND, SUSTAIN_RECOVERY_ANNOTATION_KIND
+from quantization import (
+    ONSET_REFINEMENT_ANNOTATION_KIND, SUSTAIN_RECOVERY_ANNOTATION_KIND,
+    NOTATION_TIMING_ANNOTATION_KIND,
+)
+from quantization.note_consolidation import CONSOLIDATION_ANNOTATION_KIND
 
 # A voice's notes are monophonic by construction (stream_into_lines only
 # joins a note to a line when it does NOT overlap that line's last note).
@@ -49,6 +53,7 @@ class NotationNote:
     end_ms: float             # end the page uses (sustain-extended when available)
     velocity: int
     source_note_id: str       # provenance back to the frozen Note
+    is_tuplet: bool = False   # rhythm_inference's beat-level triplet verdict (not re-guessed)
 
     @property
     def duration_ms(self) -> float:
@@ -77,18 +82,34 @@ class NotationScore:
     tempo_bpm: float = 120.0
     time_signature: Tuple[int, int] = (4, 4)
     key: Optional[str] = None
+    # The lattice's rhythmic ratio family (binary / ternary / swing, from the
+    # ReverseGeoCrypt-style lattice witness). The exporter uses it as the GATE
+    # for whether tuplets are permitted at all - triplets on strictly-binary
+    # material are almost always a per-note rounding artifact, not real.
+    ratio_family: Optional[str] = None
 
     @property
     def total_notes(self) -> int:
         return sum(len(p.notes) for p in self.parts)
 
 
-def _page_timing(note: Note, annotations: AnnotationStore) -> Tuple[float, float]:
-    """The (start, end) the page should use, reading the same evidence
-    the engraver's groove timeline reads: the refined onset (a detector-
-    latency correction, not an interpretive choice) and the sustain-
-    recovery end (posteriorgram-backed, replaces Basic Pitch's known-
-    early note-off). Falls back to the frozen values when absent."""
+def _page_timing(note: Note, annotations: AnnotationStore, use_notation_timing: bool = True) -> Tuple[float, float]:
+    """The (start, end) the page should use.
+
+    `use_notation_timing` (default): prefer the NOTATION_TIMING annotation -
+    the beat-level Bayesian rhythm inference (rhythm_inference.py), which
+    places each onset on a symbolic beat fraction (0, 1/4, 1/3, 1/2, ...)
+    instead of at its raw performed millisecond. This is THE fix for the
+    "notation confetti": raw-ms onsets land at arbitrary 32nd offsets, so
+    every gap becomes a rest and every span a tie; beat-relative symbolic
+    onsets land on the grid and let tuplets exist. Falls back (per note,
+    for beats rhythm_inference couldn't confidently parse) to the refined
+    onset + sustain-recovery end, then to the frozen values."""
+    if use_notation_timing:
+        nt = annotations.latest_value(note.id, NOTATION_TIMING_ANNOTATION_KIND)
+        if nt is not None:
+            return float(nt.get("start_ms", note.start_ms)), float(nt.get("end_ms", note.end_ms))
+
     refined = annotations.latest_value(note.id, ONSET_REFINEMENT_ANNOTATION_KIND)
     start_ms = refined.get("start_ms", note.start_ms) if refined else note.start_ms
 
@@ -111,6 +132,9 @@ def build_notation_score(
         time_signature: Tuple[int, int],
         key: Optional[str] = None,
         use_voices: bool = True,
+        use_consolidation: bool = True,
+        use_notation_timing: bool = True,
+        ratio_family: Optional[str] = None,
 ) -> NotationScore:
     """Groups notes into parts and resolves each note's page timing.
 
@@ -131,6 +155,16 @@ def build_notation_score(
     drum_flag: Dict[Tuple[str, str, StemType], bool] = {}
 
     for note in notes:
+        # Consolidation (opt-in): a same-pitch fragment absorbed into a held
+        # note never becomes its own notehead on the page (that IS the
+        # confetti); the primary carries the merged end. Same evidence the
+        # engraver's use_consolidated_timing reads - §XII.3's "notation
+        # confetti" root, removed before a single duration is quantized.
+        consolidation = (annotations.latest_value(note.id, CONSOLIDATION_ANNOTATION_KIND)
+                         if use_consolidation else None)
+        if consolidation is not None and consolidation.get("role") == "absorbed":
+            continue
+
         family = annotations.latest_value(note.id, FAMILY_ANNOTATION_KIND)
         is_drum = note.stem == StemType.DRUMS or family == _DRUM_FAMILY
         if family is None:
@@ -145,10 +179,16 @@ def build_notation_score(
             voice_id = f"{family}::all"
 
         key_tuple = (family, voice_id, note.stem)
-        start_ms, end_ms = _page_timing(note, annotations)
+        start_ms, end_ms = _page_timing(note, annotations, use_notation_timing=use_notation_timing)
+        if consolidation is not None and consolidation.get("role") == "primary":
+            end_ms = max(end_ms, consolidation.get("end_ms", end_ms))
+        # The beat-level tuplet verdict, carried from rhythm_inference - never
+        # re-derived from the rounded duration on the page.
+        nt = annotations.latest_value(note.id, NOTATION_TIMING_ANNOTATION_KIND) if use_notation_timing else None
+        is_tuplet = bool(nt.get("is_tuplet", False)) if nt else False
         buckets[key_tuple].append(NotationNote(
             pitch=note.pitch, start_ms=start_ms, end_ms=end_ms,
-            velocity=note.velocity, source_note_id=note.id,
+            velocity=note.velocity, source_note_id=note.id, is_tuplet=is_tuplet,
         ))
         drum_flag[key_tuple] = is_drum
 
@@ -165,7 +205,7 @@ def build_notation_score(
     parts.sort(key=lambda p: (p.is_drum, -p.mean_pitch))
     return NotationScore(
         parts=parts, tempo_bpm=tempo_bpm,
-        time_signature=time_signature, key=key,
+        time_signature=time_signature, key=key, ratio_family=ratio_family,
     )
 
 

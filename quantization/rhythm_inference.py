@@ -161,11 +161,15 @@ def infer_beat(observed_fractions: Sequence[float], swing_ratio: float = 0.5) ->
 class InferredNoteTiming:
     """One note's beat-inference result - same shape the notation_timing
     Annotation needs (start/end/symbolic), so the Conductor writes it
-    identically to the per-note path."""
+    identically to the per-note path. `is_tuplet` carries the beat-level
+    tuplet VERDICT forward so the page never has to re-guess whether a note
+    is a triplet from its rounded duration (that per-note guessing is the
+    ReverseGeoCrypt antipattern: decide the lattice once, not per event)."""
     note_id: str
     notation_start_ms: float
     notation_end_ms: float
     reason: str
+    is_tuplet: bool = False
 
 
 def _chord_group_onsets(notes: Sequence[Note], chord_tolerance_ms: float) -> List[List[Note]]:
@@ -231,6 +235,7 @@ def infer_voice_rhythm(
                     notation_end_ms=end,
                     reason=f"beat rhythm '{rhythm.filling.name}' "
                            f"(fit {rhythm.mean_onset_error:.3f}, {len(beat_groups)} onset(s) in beat)",
+                    is_tuplet=rhythm.filling.is_tuplet,
                 )
 
     return result
