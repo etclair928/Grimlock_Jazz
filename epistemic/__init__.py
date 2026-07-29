@@ -8,6 +8,6 @@
 # living in the same conceptual "epistemic" territory in 5.x.
 # =================================================================
 
-from epistemic.referee import TempoResolution, MeterResolution, resolve_tempo, resolve_meter
+from epistemic.referee import TempoResolution, MeterResolution, resolve_tempo, resolve_meter, arbitrate_tempo_octave
 
-__all__ = ["TempoResolution", "MeterResolution", "resolve_tempo", "resolve_meter"]
+__all__ = ["TempoResolution", "MeterResolution", "resolve_tempo", "resolve_meter", "arbitrate_tempo_octave"]

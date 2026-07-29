@@ -185,6 +185,62 @@ def resolve_tempo(
     return TempoResolution(tempo_meter, contention)
 
 
+# --- #2 tempo-octave arbiter -------------------------------------------------
+# A confident, trained downbeat witness is the one thing that can break the
+# tempo OCTAVE cleanly. The per-witness octave correction (octave_correction.py)
+# uses a log-normal tempo prior + a compound-tactus test; that test correctly
+# halves a genuinely-slow triplet-feel song (Gospel 136->67) but OVER-fires on a
+# song that only has a triplet-shuffle FEEL over a normal pulse (No Pasaran:
+# user's ear says quarter=132, the pipeline halved it to 66). Measured: madmom's
+# downbeat tracker reads No Pasaran at 130 with confidence 0.92, but Gospel at
+# 130 with confidence only 0.30 - so a confidence floor lets the witness rescue
+# the false halving without touching the true one.
+OCTAVE_ARBITER_MIN_CONFIDENCE = 0.70
+OCTAVE_ARBITER_RATIO_TOLERANCE = 0.15   # how close witness/resolved must be to exactly 2:1
+OCTAVE_ARBITER_MAX_BPM = 180.0          # never adopt an implausibly fast "tactus"
+
+
+def arbitrate_tempo_octave(
+        resolution: TempoResolution,
+        witness_bpm: float,
+        witness_beat_times_ms: Sequence[float],
+        witness_confidence: float,
+        witness_downbeat_times_ms: Sequence[float] = (),
+) -> TempoResolution:
+    """#2: when a CONFIDENT downbeat witness reads a clean ~2x the resolved
+    tempo, the resolved tempo was octave-HALVED - adopt the witness's octave
+    and its tracked grid. Deliberately narrow so it fixes only the real bug:
+      * confidence floor - a low-confidence witness (Gospel's 130 @ 0.30)
+        cannot override a genuinely slow tempo (Gospel's real 67);
+      * exactly 2:1 only - a 3:2 compound relation (Copper 140 vs 94,
+        Wallet 118 vs 78) is NOT the halving bug and is left alone;
+      * sane tactus ceiling. Everything else returns unchanged."""
+    resolved = resolution.tempo_meter
+    if (witness_bpm <= 0 or resolved.tempo_bpm <= 0
+            or witness_confidence < OCTAVE_ARBITER_MIN_CONFIDENCE
+            or witness_bpm > OCTAVE_ARBITER_MAX_BPM):
+        return resolution
+    if abs(witness_bpm / resolved.tempo_bpm - 2.0) > OCTAVE_ARBITER_RATIO_TOLERANCE:
+        return resolution
+
+    corrected = TempoMeter(
+        tempo_bpm=_snap_to_round_bpm(witness_bpm),
+        confidence=max(resolved.confidence, witness_confidence),
+        time_signature_numerator=resolved.time_signature_numerator,
+        time_signature_denominator=resolved.time_signature_denominator,
+        beat_times_ms=tuple(witness_beat_times_ms) if witness_beat_times_ms else resolved.beat_times_ms,
+        downbeat_times_ms=tuple(witness_downbeat_times_ms),
+        source=resolved.source,
+    )
+    contention = dict(resolution.contention or {})
+    contention["octave_arbiter"] = {
+        "corrected_from_bpm": resolved.tempo_bpm,
+        "corrected_to_bpm": corrected.tempo_bpm,
+        "witness_confidence": witness_confidence,
+    }
+    return TempoResolution(corrected, contention)
+
+
 def resolve_meter(candidates: Sequence[Tuple[int, int, float]]) -> MeterResolution:
     """Weighted vote among (numerator, denominator, confidence)
     candidates from one or more independent meter estimates."""
@@ -215,4 +271,4 @@ def resolve_meter(candidates: Sequence[Tuple[int, int, float]]) -> MeterResoluti
     return MeterResolution(winner[0], winner[1], confidence, contention)
 
 
-__all__ = ["TempoResolution", "MeterResolution", "resolve_tempo", "resolve_meter"]
+__all__ = ["TempoResolution", "MeterResolution", "resolve_tempo", "resolve_meter", "arbitrate_tempo_octave"]

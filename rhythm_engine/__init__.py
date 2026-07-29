@@ -12,6 +12,7 @@
 
 from rhythm_engine.onsets import OnsetCandidates, detect_onset_candidates, refine_onset_to_nearest
 from rhythm_engine.tempo_witness import TempoWitness, run_librosa_tempo, run_madmom_tempo
+from rhythm_engine.downbeat_witness import DownbeatWitness, run_madmom_downbeat
 from rhythm_engine.note_onset_tempo_witness import run_note_onset_tempo_witness
 from rhythm_engine.lattice_witness import Anchor, GeometricLattice, run_lattice_witness
 from rhythm_engine.pulse_field import PulseFieldResult, run_pulse_field
@@ -31,6 +32,8 @@ __all__ = [
     "TempoWitness",
     "run_librosa_tempo",
     "run_madmom_tempo",
+    "DownbeatWitness",
+    "run_madmom_downbeat",
     "run_note_onset_tempo_witness",
     "Anchor",
     "GeometricLattice",

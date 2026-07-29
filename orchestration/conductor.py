@@ -44,8 +44,9 @@ from rhythm_engine import (
     run_pulse_field, estimate_groove, compute_phase_deltas, detect_drums,
     build_phase_locked_grid, estimate_time_signature, sample_beat_accents,
     fft_meter_candidate, resolve_denominator, detect_onset_candidates,
+    run_madmom_downbeat,
 )
-from epistemic import resolve_tempo, resolve_meter, TempoResolution, MeterResolution
+from epistemic import resolve_tempo, resolve_meter, arbitrate_tempo_octave, TempoResolution, MeterResolution
 from quantization import (
     build_lattice, infer_duration, QUANTIZATION_ANNOTATION_KIND,
     propose_sustain_extensions, SUSTAIN_RECOVERY_ANNOTATION_KIND,
@@ -342,6 +343,7 @@ def transcribe_file(
         tempo_witnesses: List = []
         lattice = None
         ratio_family = None
+        downbeat_witness = None
         ts_num, ts_den = guided_time_signature if guided_time_signature is not None else (4, 4)
         guided_grid = build_phase_locked_grid(guided_tempo_bpm, onset_candidates.combined_ms, duration_ms)
         guided_downbeats = tuple(guided_grid[i] for i in range(0, len(guided_grid), ts_num)) \
@@ -393,6 +395,41 @@ def transcribe_file(
 
         tempo_resolution = resolve_tempo(tempo_witnesses)
 
+        # Distributed-downbeat witness (open problem #7): madmom's trained
+        # RNN+DBN bar tracker. Computed here (once) because it serves BOTH
+        # the meter vote below AND the #2 tempo-octave arbiter next.
+        downbeat_witness = run_madmom_downbeat(engine, master_track)
+
+        # Tempo-octave arbiter (open problem #2): the per-witness octave
+        # correction over-fires its compound-tactus test on a triplet-SHUFFLE
+        # feel and halves a normal pulse (No Pasaran quarter=132 -> 66). A
+        # CONFIDENT downbeat witness reading a clean 2x the resolved tempo is
+        # the evidence that halving was wrong; it does NOT touch a genuinely
+        # slow triplet-feel song (Gospel 67), whose witness is only 0.30
+        # confident. Guided tempo is a hard lock (§2.7) - never arbitrated.
+        if downbeat_witness is not None and len(downbeat_witness.beat_times_ms) >= 2:
+            bt = downbeat_witness.beat_times_ms
+            witness_iois = [bt[i + 1] - bt[i] for i in range(len(bt) - 1)]
+            witness_bpm = 60000.0 / median(witness_iois) if witness_iois else 0.0
+            before_bpm = tempo_resolution.tempo_meter.tempo_bpm
+            tempo_resolution = arbitrate_tempo_octave(
+                tempo_resolution, witness_bpm, bt,
+                downbeat_witness.confidence, downbeat_witness.downbeat_times_ms,
+            )
+            after_bpm = tempo_resolution.tempo_meter.tempo_bpm
+            if after_bpm != before_bpm:
+                music_box.log_decision(
+                    stage_name="epistemic", decision_type="tempo_octave_arbitrated",
+                    before_state={"resolved_bpm": round(before_bpm, 1)},
+                    after_state={"corrected_bpm": round(after_bpm, 1),
+                                 "witness_bpm": round(witness_bpm, 1),
+                                 "witness_confidence": round(downbeat_witness.confidence, 2)},
+                    reasoning="#2: a confident downbeat witness read ~2x the resolved tempo - "
+                              "the compound-tactus correction had octave-halved it. Adopted the "
+                              "witness's octave and tracked grid.",
+                    reversible=False,
+                )
+
     if guided_time_signature is not None:
         # Meter is the user's, at confidence 1.0 - no estimation, no vote.
         g_num, g_den = guided_time_signature
@@ -433,6 +470,38 @@ def transcribe_file(
                 meter_candidates.append(
                     (fft_numerator, resolve_denominator(fft_numerator, ratio_family), fft_power)
                 )
+
+        # Distributed-downbeat witness (#7): madmom's trained RNN+DBN bar
+        # tracker. Both onset-based estimates above read the downbeat from
+        # accent LOUDNESS, which we measured is a weak/flat cue (harmonic
+        # change 1.04-1.23x chance, kick-on-1 1.10-1.38x) - blind to a
+        # downbeat felt through harmony/bass. The trained model fuses those
+        # cues implicitly; it matched the ear on the songs the onset test
+        # missed (No Pasaran 4/4 not 65-halved, Hopeful 6/4 not 4/4). Voted,
+        # not obeyed: resolve_meter sums it against the two above by its own
+        # stability-derived confidence.
+        # Reuse the witness already computed above for the #2 arbiter; only
+        # run it here if it wasn't (i.e. tempo was guided so that block was skipped).
+        if downbeat_witness is None:
+            downbeat_witness = run_madmom_downbeat(engine, master_track)
+        if downbeat_witness is not None:
+            meter_candidates.append((
+                downbeat_witness.beats_per_bar,
+                resolve_denominator(downbeat_witness.beats_per_bar, ratio_family),
+                downbeat_witness.confidence,
+            ))
+            music_box.log_decision(
+                stage_name="rhythm_engine", decision_type="downbeat_witness",
+                before_state={}, after_state={
+                    "beats_per_bar": downbeat_witness.beats_per_bar,
+                    "downbeats": len(downbeat_witness.downbeat_times_ms),
+                    "confidence": round(downbeat_witness.confidence, 2)},
+                reasoning="madmom RNN+DBN downbeat tracker (open problem #7): a trained "
+                          "witness for the metrical top level, voted into resolve_meter "
+                          "against the onset-loudness estimates it outperforms on harmony-"
+                          "felt downbeats.",
+                reversible=False,
+            )
 
         if not meter_candidates:
             meter_candidates.append((4, 4, 0.3))
