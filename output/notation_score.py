@@ -29,7 +29,7 @@ from instrument_attribution.resolve import ANNOTATION_KIND as FAMILY_ANNOTATION_
 from instrument_attribution.resolve import VOICE_ANNOTATION_KIND
 from quantization import (
     ONSET_REFINEMENT_ANNOTATION_KIND, SUSTAIN_RECOVERY_ANNOTATION_KIND,
-    NOTATION_TIMING_ANNOTATION_KIND,
+    NOTATION_TIMING_ANNOTATION_KIND, TIE_RECONSTRUCTION_ANNOTATION_KIND,
 )
 from quantization.note_consolidation import CONSOLIDATION_ANNOTATION_KIND
 
@@ -54,6 +54,8 @@ class NotationNote:
     velocity: int
     source_note_id: str       # provenance back to the frozen Note
     is_tuplet: bool = False   # rhythm_inference's beat-level triplet verdict (not re-guessed)
+    tie_start: bool = False   # tie_reconstruction: this note is held into the next same-pitch note
+    tie_stop: bool = False    # ...and/or continues a tie from the previous one
 
     @property
     def duration_ms(self) -> float:
@@ -191,6 +193,25 @@ def build_notation_score(
             velocity=note.velocity, source_note_id=note.id, is_tuplet=is_tuplet,
         ))
         drum_flag[key_tuple] = is_drum
+
+    # Ties (tie_reconstruction): a note held into the next same-pitch note
+    # renders as tied notes rather than two separate ones. Only set a tie when
+    # BOTH ends SURVIVE into the score - when consolidation is on it has
+    # already ABSORBED these same-pitch fragments into one sustained note (a
+    # cleaner result than a tie), so the target is gone and no tie is drawn.
+    # This is why the signal is a correct no-op on the consolidated page and a
+    # real edge only in the faithful (non-consolidated) view.
+    by_source: Dict[str, NotationNote] = {
+        nn.source_note_id: nn for nns in buckets.values() for nn in nns
+    }
+    for nn in list(by_source.values()):
+        tie = annotations.latest_value(nn.source_note_id, TIE_RECONSTRUCTION_ANNOTATION_KIND)
+        if tie is None:
+            continue
+        target = by_source.get(tie.get("tied_to_note_id"))
+        if target is not None:          # both ends survived -> draw the tie
+            nn.tie_start = True
+            target.tie_stop = True
 
     parts: List[NotationPart] = []
     for (family, voice_id, stem), nnotes in buckets.items():

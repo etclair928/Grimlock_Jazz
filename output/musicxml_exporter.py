@@ -120,29 +120,42 @@ def _chord_events(notes: List[NotationNote]) -> List[List[NotationNote]]:
 
 
 def _events_to_voices(events: List[List[NotationNote]]) -> List[List[List[NotationNote]]]:
-    """Assigns chord-events to the fewest monophonic voices such that no
-    two events in a voice overlap in time. Only genuinely staggered
-    polyphony (a note beginning while another still sounds) forces a new
-    voice - which is what real independent lines are.
+    """Assigns chord-events to monophonic voices with REGISTER CONTINUITY:
+    among the voices free at this event's onset, pick the one whose last
+    event sat closest in pitch, instead of the first free slot. A melodic
+    line then stays in ONE voice instead of being scattered across whatever
+    slot happened to be open.
 
-    Rendering-only: this guarantees legal MusicXML, not musical truth.
-    Musically-meaningful voicing is the upstream data-association problem
-    (§XIII.5); this is the floor that keeps whatever we're handed openable."""
+    MEASURED (2026-07-28 voice-separation experiment, Hopeful, 2337 events):
+    at the SAME voice count as first-free (9), this cuts mean intra-voice
+    pitch-jump from 8.2 to 2.5 semitones - coherent lines for free. It beat
+    a global min-cost path-cover on both axes (the graph floors at ~177
+    voices because it snaps a voice at every rest-gap). This is the cheap
+    win; it does NOT reduce gappiness (~inherent to notating real polyphony)
+    and does NOT change the voice count, so it is rest-neutral - unlike the
+    register+sparse-merge combo that was tried and reverted for raising the
+    rest ratio.
+
+    Rendering-only: guarantees legal MusicXML, not musical truth. Genuine
+    voice assignment is the upstream data-association problem (§XIV.3), which
+    the experiment showed voice is under-determined for (edge entropy 0.68)."""
     voices: List[List[List[NotationNote]]] = []
     free_at: List[float] = []
+    last_pitch: List[float] = []
     for ev in sorted(events, key=lambda e: min(n.start_ms for n in e)):
         start = min(n.start_ms for n in ev)
         end = max(n.end_ms for n in ev)
-        placed = False
-        for i, f in enumerate(free_at):
-            if start >= f:
-                voices[i].append(ev)
-                free_at[i] = end
-                placed = True
-                break
-        if not placed:
+        pitch = sum(n.pitch for n in ev) / len(ev)
+        free = [i for i, f in enumerate(free_at) if start >= f]
+        if free:
+            i = min(free, key=lambda k: abs(last_pitch[k] - pitch))
+            voices[i].append(ev)
+            free_at[i] = end
+            last_pitch[i] = pitch
+        else:
             voices.append([ev])
             free_at.append(end)
+            last_pitch.append(pitch)
     return voices
 
 
@@ -177,6 +190,7 @@ def build_music21_score(score: NotationScore):
     numbered from 1 - always valid, whatever the input polyphony."""
     from music21 import stream, note as m21note, chord as m21chord, tempo as m21tempo
     from music21 import meter as m21meter, key as m21key, instrument as m21instrument
+    from music21 import tie as m21tie
 
     origin_ms = min(
         (n.start_ms for p in score.parts for n in p.notes),
@@ -210,6 +224,17 @@ def build_music21_score(score: NotationScore):
             el = m21chord.Chord(sorted(n.pitch for n in event))
         el.quarterLength = ql
         el.volume.velocity = max(n.velocity for n in event)
+        # Ties (tie_reconstruction, via NotationNote flags): a held note that
+        # tie_reconstruction joined to the next same-pitch note. start->next,
+        # stop<-prev, both = a middle note in a tie chain -> continue.
+        start = any(n.tie_start for n in event)
+        stop = any(n.tie_stop for n in event)
+        if start and stop:
+            el.tie = m21tie.Tie("continue")
+        elif start:
+            el.tie = m21tie.Tie("start")
+        elif stop:
+            el.tie = m21tie.Tie("stop")
         return el
 
     m_score = stream.Score()

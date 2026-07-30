@@ -565,4 +565,26 @@ Lesson: consumption is almost entirely the **timing → engraver** path; the SYM
 5. **Retire-or-wire the redundant dead-ends** — stop producing data nothing reads.
 The blind-DSP items (timbre #4, merge-gate #6, global ternary #1) are **CLOSED as walls** — do not re-chase; genuine progress needs learned models / reference templates, not more DSP.
 
+## XV. Voice separation — the graph proposal, tested and triaged (2026-07-28)
+
+An external proposal (ChatGPT) argued to replace `VoiceLine` with a `VoiceAssociationGraph`: notes as nodes, *pairwise continuation edges* carrying evidence from every witness (pitch, register, timbre, phrase, harmony, stem), voices emerging only when a consumer runs a global solver (min-cost flow / path cover / belief propagation) at query time — "delay commitment; the primitive is the relationship, not the voice label." Philosophically it's the frozen-detection/annotation law applied to a *relation*. We tested it against measurement rather than argument.
+
+### XV.1 The experiment (Hopeful harmonic stems, 2337 chord-events)
+Three-way: merge policy × algorithm, plus ChatGPT's edge-entropy diagnostic.
+- **greedy first-free (current):** 9 voices, mean intra-voice pitch-jump **8.2** semitones — incoherent "voices" (whatever slot was free).
+- **greedy REGISTER-CONTINUITY** (pick the closest-register free voice): 9 voices, jump **2.5** — *same voice count, coherent lines, one-line change, no solver.*
+- **global min-cost path-cover:** floors at **~177 voices** no matter the terminal cost (it snaps a voice at every rest-gap >650 ms, so it physically cannot make few voices), best coherence 4.6. **Dominated on both axes by the one-liner.**
+- **edge entropy 0.68** (high): even with pitch+register, most notes have several near-equal continuations — **voice is genuinely under-determined by the strong cues.** That is why no method is clean.
+- **un-merging** (stem-of-origin as a prior) separates *instruments* but not voices *within* a stem (per-stem entropy 0.63-0.67).
+
+### XV.2 Verdict
+The graph is **elegant infrastructure for a problem a trivial greedy fix solves better.** ChatGPT's *coherence intuition* was right (global beats first-free on line continuity) and his *edge-entropy diagnostic* is a keeper; his *specific solver* (continuation path-cover) is refuted — it can't produce few voices — and the **"generalize to a universal Musical Relationship Graph"** step is the exact model-everything-jointly scope-creep §X/§XIII.7 reject. **Not building the graph rewrite.**
+
+### XV.3 What was adopted
+- **Register-continuity in `_events_to_voices`** (the one-liner). Coherence 8.2→2.5. HONEST TRADE-OFF, measured at the render: it **raises the rest ratio 1.10→1.24 (+~666 rests)** on Hopeful, because coherent voices honestly *rest* when their line is silent, whereas first-free crams unrelated notes into a dense staff (fewer rests, but not real voices). The rest-ratio metric penalizes honest voicing; coherence is the better readability signal — but this is a your-eye call and fully reversible.
+- **`tie_candidate` wired at last** — but it turned out **superseded by consolidation**: all 39 Hopeful tie candidates (same-pitch, gap ≤40 ms) fall inside consolidation's 60 ms merge window, so consolidation already fuses them into one sustained note (better than two tied notes). Wired correctly anyway: ties are drawn only when both ends survive, so it's a **correct no-op on the consolidated page (0 ties) and a real edge in the faithful/non-consolidated view (39 ties).** No longer dead-end data; music21 also still auto-renders ~1082 cross-barline ties independently.
+
+### XV.4 What remains for voice separation
+The ceiling is **XV.1's entropy 0.68** — voice is under-determined by the cheap cues, so *no* solver (greedy, graph, or flow) gets a clean answer. Real progress needs either far stronger cues (a learned voice model / transformer) or accepting that genuinely dense polyphony is dense on the page. The graph is not the unlock; the missing information is.
+
 **Through-line, extended:** the detection layer has now survived a full pipeline change (the merge) without regression, and survived two hostile architecture reviews with its core laws intact. Everything still open is downstream of the notes and upstream of the page.
