@@ -526,4 +526,43 @@ Two long external architecture audits were triaged this session. Both were usefu
 6. **Injection–recovery harness** (§IX.2) — unchanged in importance and unbuilt; the split metric of XIII.4 tells us it must score the two axes *separately*.
 7. **Evidence correlation / commensurable confidence** (XIII.1, XIII.2) — real debt, but diagnostic before it is corrective. Measure Σ before designing any fusion.
 
+## XIV. The rebuild session — solved, walled, and the wiring audit (2026-07-27/28)
+
+An extended build+measure pass took the 8-item working list (1 consolidation, 2 tempo-octave, 3 notation, 4 timbre, 5 drums, 6 stem-merge, 7 downbeat, 8 reconciliation) and resolved or *precisely bounded* every one. All commits on `grimlock-6.0-rebuild`. The through-line: the tractable slices are now either done, or measured as walls, and what genuinely remains is large (upstream voice separation) or risky (note rewrite).
+
+### XIV.1 Solved and committed
+- **Consolidation** (the keystone; the "notation confetti" root of XII.3). `quantization/note_consolidation.py` merges Basic Pitch's fragmented same-pitch runs into sustained notes — opt-in, annotation-only (§2), pitch-equality a hard gate + connected-component grouping (ported from Symphony `velocity_merge`). You Say pitched 4847→2547, durations ~doubled. `4225746`.
+- **Drums** (was a 3-rule stub). `rhythm_engine/drums.py` rebuilt multiband multi-voice — kick/snare/hat detected independently per band and coexisting — then an over-detection refinement (kick must dominate low-band; snare on a narrow 2-5kHz "crack" band; per-band energy gate). You Say 2912→1504 hits at musical per-bar rates. `f063d92`+`a81b3d2`.
+- **Distributed downbeat (#7).** `rhythm_engine/downbeat_witness.py` = madmom RNN+DBN bar tracker as a meter witness, after measuring that every hand-rollable source is a weak cue (beat-sync harmonic change 1.04-1.23× chance; kick-on-1 1.10-1.38×, weakest on syncopation). Fixes Hopeful→6/4, No Pasarán→4/4; voted into `resolve_meter` (helper, not fighter). `0ca24e3`.
+- **Tempo octave (#2).** `epistemic/referee.py::arbitrate_tempo_octave` — a *confident* downbeat witness reading a clean 2:1 above the resolved tempo un-halves it (No Pasarán 66→130); a confidence floor protects a genuinely-slow triplet-feel song (Gospel stays 67; its witness is only 0.30 confident). `0ca24e3`. **Recorded negative:** harmonic rhythm is octave-INVARIANT in absolute time, so "let harmonic rhythm vote on the octave" (XI-era idea) cannot work — disproved by measurement.
+- **Notation slice (#3).** MusicXML export wired opt-in (`transcribe_file(output_musicxml_path=...)`); the page now reads rhythm_inference's beat-relative symbolic timing + consolidation, and tuplets are gated at the LATTICE level — the exporter honors rhythm_inference's per-beat `is_tuplet` verdict rather than re-guessing a triplet from a rounded duration (that per-note guessing produced 3210 tuplets > 4971 noteheads). Hopeful 6/4 page: rests 1.51→1.10, ties 2099→1092, tuplets 0→177, 32nds 849→2. `b7fb984`.
+- **Check reconciliation, safe half (#8).** A `repeat_drift` annotation localizes disagreement to the OUTLIER repeat instance (No Pasarán: 209 notes across A/B/C; consistent D/E untouched). Annotation-only; the note-rewrite half stays deferred. `a3e50d3`.
+
+### XIV.2 Measured negative results — walls, recorded so we don't retry
+- **Instrument timbre ID (#4).** Brass vs piano is not separable by blind per-note DSP: attack (58 vs 45 ms), decay slope, bandwidth all overlap, and spectral centroid puts brass (2145) DEAD BETWEEN the two pianos (2121, 2712). Un-brassed the patch map to neutral keyboards (`5a6cf00`). Genuine family ID needs reference-template matching, not DSP.
+- **Stem similarity-gated merge (#6).** No cheap pre-transcription signal separates "one instrument scattered" from "distinct instruments": mean-MFCC timbre-sim is +0.96..1.00 for ALL songs (Gospel is all-brass, so ~1.0 is even correct); onset-overlap is ~0.18 for ALL (scattered content is mutually EXCLUSIVE across stems, not duplicated). Kept always-merge (−53% dedup, validated). The only reliable signal is post-transcription note-count duplication, which needs the transcription the merge exists to avoid.
+- **Global ternary/swing detection (#1).** The KDE ratio-cluster analyzer is ALREADY ported (`lattice_witness.find_ratio_clusters`) and returns `binary` for every song — pure triplets and pure binary both give IOI ratio 1.0, so ratios can't discriminate; a within-beat subdivision-occupancy test is equally flat (~chance, incl. the binary control). BUT the tuplet gate does not need it: rhythm_inference's per-beat `is_tuplet` is well-behaved (Hopeful 177 triplets, binary You Say 0.5%). If a global family is ever needed (compound meter in `resolve_denominator`), AGGREGATE the per-beat verdicts — do not build a DSP detector.
+
+**Pattern (four negatives, same direction): demucs's separated harmonic stems do not carry cheap discriminating features — for instrument identity (#4), merge decisions (#6), or rhythmic family (#1).** The separation front is where the cheap signals die; progress there needs learned models / reference templates, not more DSP.
+
+### XIV.3 Voice separation is upstream — confirmed by regression
+The page is still gappy (Hopeful voices ~50% rests, overflow staves). Fixing it at the exporter — register-continuity voice assignment + sparse-voice merge — was MEASURED WORSE (rest ratio 1.10→1.24) and reverted: the merged harmonic stem has genuine 5+-deep polyphony, so no legal voice merge exists and the exporter can only render the polyphony it is handed. This confirms §XIII.5 empirically: voice tracking is an upstream **data-association** problem (JPDA/MHT), not a rendering fix. The ~50%-rest voices reflect REAL overlapping content. Real levers (both large): proper data-association, or a notation-specific de-merge (keep guitar/piano/other as separate thinner staves rather than the brightness-rebucketed merged families).
+
+### XIV.4 The data-flow audit — signals computed and consumed by nobody
+A producer/consumer trace of the `AnnotationStore` found analysis with no downstream:
+- **`tie_candidate`** (tie_reconstruction) → carries `{tied_to_note_id, boundary_ms}`, exactly what the page needs for ties; the exporter never reads it. ★ highest-value cheap wiring.
+- **`section` / `repeat_group` / `motif` / `repeat_drift`** (Check) → the entire form/structure layer dead-ends; nothing consumes song structure.
+- **`duration_hypothesis`** (temporal_lattice) → symbolic durations, unread (engraver uses `notation_timing`).
+- **`wobble_group`** (pitch_wobble_collapse) → unconsumed (0 on tested songs anyway).
+- **`key_fit` / `acoustic_activity`** → redundant per-note copies of data that already flows via `findings.key` / the `AnechoicReport` object.
+Lesson: consumption is almost entirely the **timing → engraver** path; the SYMBOLIC/STRUCTURAL signals (ties, sections, repeats) never reach the page. Part of why the page is still poor is a **wiring gap, not a missing algorithm.**
+
+### XIV.5 Revised leverage ranking (supersedes XIII.8)
+1. **Wire `tie_candidate` → the MusicXML page** — cheap, safe, already computed; real ties on the page.
+2. **Voice separation via upstream data-association** (JPDA/MHT) — now confirmed as the single largest page lever and the ONLY place it can be fixed. Research-grade; its own effort.
+3. **Wire Check's structure (section/repeat) into notation** — rehearsal marks, section/barline resets, and the substrate for #8's rewrite.
+4. **#8 note-rewrite reconciliation (opt-in)** — consume `repeat_drift` to prefer the consensus reading; risky (real music varies), user-gated.
+5. **Retire-or-wire the redundant dead-ends** — stop producing data nothing reads.
+The blind-DSP items (timbre #4, merge-gate #6, global ternary #1) are **CLOSED as walls** — do not re-chase; genuine progress needs learned models / reference templates, not more DSP.
+
 **Through-line, extended:** the detection layer has now survived a full pipeline change (the merge) without regression, and survived two hostile architecture reviews with its core laws intact. Everything still open is downstream of the notes and upstream of the page.
