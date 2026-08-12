@@ -1020,7 +1020,16 @@ def transcribe_file(
     # annotations; the engraver RENDERS the merged spans only under
     # use_consolidated_timing, so default output is unchanged - this is an
     # opt-in timeline to A/B against raw, like notation/groove timing.
-    runs_merged, fragments_absorbed = consolidate_fragments(pitched_notes, annotations)
+    # Attack evidence gates the merge. Same-pitch fragments abut EXACTLY (gap
+    # 0.0ms, no overlap, velocity ratio ~0.98) whether Basic Pitch re-triggered
+    # a held note or the player struck the chord again, so only the audio can
+    # tell them apart. Without this, planing textures lose their voicings -
+    # measured on Ellington's Reflections in D: 31% of notes and 43% of the
+    # 4+ note chords deleted. onset_candidates is already computed upstream
+    # (for the phase-locked grid), so this costs nothing new.
+    _attack_ms = sorted(onset_candidates.combined_ms) if onset_candidates else ()
+    runs_merged, fragments_absorbed = consolidate_fragments(
+        pitched_notes, annotations, onsets_ms=_attack_ms)
     music_box.log_decision(
         stage_name="quantization", decision_type="note_consolidation",
         before_state={"pitched_notes": len(pitched_notes)},

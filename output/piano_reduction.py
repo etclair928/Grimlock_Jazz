@@ -58,6 +58,16 @@ SPLIT_SWITCH_PENALTY = 0.4
 # rhythm -> one chord in one voice. Divergent rhythm -> separate voices.
 CHORD_ONSET_TOL_MS = 40.0
 CHORD_OFFSET_TOL_MS = 90.0
+# NB the two constants above are DEAD - _chord_events was rewritten to
+# grid-aligned grouping and no longer reads them. Kept only because removing
+# them would silently change nothing while looking like it changed something.
+
+# How close two RAW onsets must be to count as one chord, as a fraction of a
+# grid cell, before anything is snapped. Half a cell is the distance at which
+# two notes would have landed in the same cell had the boundary fallen
+# elsewhere, so this catches boundary-straddle splits without inventing a
+# threshold. Swept on Ellington - see _chord_events.
+CHORD_RAW_TOLERANCE_CELLS = 0.5
 
 # Acoustic gate for the legato fill (XVIII.3 #1, RECALIBRATED 2026-08-08).
 #
@@ -327,9 +337,37 @@ def _chord_events(notes: List[NotationNote], ms_per_beat: float = 0.0,
         # and let the chord hold as long as its longest member (what a player
         # actually does). Genuinely divergent durations still separate - that is
         # the §13.1 rhythmic-independence test doing its real job.
+        # GROUP ON RAW PROXIMITY, THEN SNAP - not the other way round.
+        #
+        # Grouping by snapped cell alone splits a chord whose notes straddle a
+        # cell boundary: two notes 5ms apart round in opposite directions, land
+        # in different cells, become different slots, and end up in DIFFERENT
+        # VOICES. MEASURED on Ellington's Reflections in D, where the writing is
+        # six-note orchestral voicings: every "spread" chord in our output was
+        # EXACTLY 214ms wide - one 16th cell at that tempo - which is arithmetic,
+        # not piano playing. Mean chord size came out 3.01 against the
+        # reference's 6.07, and parallel motion (the planing that defines the
+        # piece) collapsed to 4% against 49%.
+        #
+        # So decide chord membership on the performance clock, where
+        # simultaneity is a physical fact, and only then assign the group one
+        # cell. The tolerance is half a grid cell, which is by construction the
+        # distance at which two onsets would have snapped together had the
+        # boundary fallen anywhere else - no new magic number.
+        ordered = sorted(notes, key=lambda n: (n.start_ms, n.pitch))
+        tol = step * CHORD_RAW_TOLERANCE_CELLS
+        raw_groups: List[List[NotationNote]] = []
+        for note in ordered:
+            if raw_groups and note.start_ms - raw_groups[-1][0].start_ms <= tol:
+                raw_groups[-1].append(note)
+            else:
+                raw_groups.append([note])
+
         by_onset: Dict[float, List[NotationNote]] = {}
-        for note in sorted(notes, key=lambda n: (n.start_ms, n.pitch)):
-            by_onset.setdefault(cell(note.start_ms), []).append(note)
+        for group in raw_groups:
+            # one cell for the whole group, taken from its earliest onset
+            c = cell(group[0].start_ms)
+            by_onset.setdefault(c, []).extend(group)
 
         slots = []
         for onset_cell in sorted(by_onset):

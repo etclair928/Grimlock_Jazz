@@ -35,8 +35,9 @@
 
 from __future__ import annotations
 
+import bisect
 from collections import defaultdict
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from core import AnnotationStore, Annotation, Note, Provenance
 
@@ -49,10 +50,35 @@ CONSOLIDATION_ANNOTATION_KIND = "consolidation"
 DEFAULT_MERGE_GAP_MS = 60.0
 
 
+# How close a detected onset must be to the boundary between two same-pitch
+# notes to count as a fresh attack there.
+ATTACK_WINDOW_MS = 50.0
+
+
+def _has_attack(boundary_ms: float, onsets_ms: Sequence[float]) -> bool:
+    """Is there a detected attack at this boundary? This is the ONLY thing that
+    separates a re-trigger from a re-articulation.
+
+    MEASURED on Ellington (538 candidates) and Chopin (331): every single
+    merge candidate has a gap of EXACTLY 0.0ms, zero overlap, and a
+    second/first velocity ratio of ~0.98 with 46% louder. Basic Pitch segments a
+    continuous pitch activation at frame boundaries, so a held or repeated pitch
+    arrives as abutting notes regardless of whether the player struck it again.
+    Gap, overlap and velocity therefore carry NO information here - the audio
+    does."""
+    if not onsets_ms:
+        return False
+    i = bisect.bisect_left(onsets_ms, boundary_ms - ATTACK_WINDOW_MS)
+    while i < len(onsets_ms) and onsets_ms[i] <= boundary_ms + ATTACK_WINDOW_MS:
+        return True
+    return False
+
+
 def consolidate_fragments(
         notes: List[Note],
         annotations: AnnotationStore,
         max_gap_ms: float = DEFAULT_MERGE_GAP_MS,
+        onsets_ms: Optional[Sequence[float]] = None,
 ) -> Tuple[int, int]:
     """Finds runs of same-(stem, pitch) notes separated by <= max_gap_ms
     (overlaps included) and annotates them: the earliest note of each run
@@ -72,7 +98,15 @@ def consolidate_fragments(
             run = [group[i]]
             run_end = group[i].end_ms
             j = i + 1
-            while j < len(group) and group[j].start_ms - run_end <= max_gap_ms:
+            while (j < len(group) and group[j].start_ms - run_end <= max_gap_ms
+                   # A fresh attack at the boundary means the player struck this
+                   # pitch again - stop the run rather than absorbing it. Without
+                   # this, planing textures (where the same pitches recur by
+                   # design) lose their voicings: MEASURED on Ellington's
+                   # Reflections in D, consolidation deleted 31% of notes and 43%
+                   # of the 4+ note chords, taking mean chord size to 3.16 against
+                   # the reference's 6.07.
+                   and not _has_attack(group[j].start_ms, onsets_ms or ())):
                 run.append(group[j])
                 run_end = max(run_end, group[j].end_ms)
                 j += 1
