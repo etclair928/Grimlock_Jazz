@@ -11,6 +11,7 @@ from instrument_attribution.voice_continuity import VoiceLine, stream_into_lines
 from instrument_attribution.resolve import resolve_instrument_identity, STEM_FAMILY, VOICE_ANNOTATION_KIND
 
 __all__ = [
+    "check_range", "RangeVerdict", "RANGE_ANNOTATION_KIND", "IMPLAUSIBLE",
     "TimbreFingerprint",
     "fingerprint_notes",
     "VoiceLine",
@@ -19,3 +20,7 @@ __all__ = [
     "STEM_FAMILY",
     "VOICE_ANNOTATION_KIND",
 ]
+
+from instrument_attribution.range_check import (
+    check_range, RangeVerdict, RANGE_ANNOTATION_KIND, IMPLAUSIBLE,
+)

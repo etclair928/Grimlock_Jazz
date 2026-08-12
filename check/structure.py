@@ -41,12 +41,41 @@ class Motif:
 
 
 def detect_form(engine, track, min_section_s: float = 4.0, k: int = 5) -> List[Section]:
-    """Macro form via McFee/Ellis Laplacian structural segmentation:
-    beat-synchronous CQT gives the REPETITION structure, MFCC gives local
-    timbre CONTINUITY; the two combine into one graph whose spectral
-    clustering yields labeled sections. Returns [] for audio too short to
-    segment. Pure DSP + spectral clustering - no learned weights, no
-    mutation of anything."""
+    """Macro form via McFee/Ellis Laplacian structural segmentation.
+
+    WHAT IT RETURNS: a time-ordered list of CONTIGUOUS, non-overlapping
+    `Section`s covering the track - e.g. A B C B D C A ... Same `label` means
+    the same section RECURRING, so labels repeat while spans do not. This is
+    the song's form as a timeline, and it is the thing to read when asking
+    "where are the sections?".
+
+    HOW: beat-synchronous CQT gives the REPETITION structure (a recurrence
+    matrix - which beats sound like which other beats), MFCC gives local timbre
+    CONTINUITY (consecutive-beat similarity). Those two graphs are combined
+    with a degree-balanced weight `mu`, and the normalized Laplacian's leading
+    eigenvectors are k-means clustered: beats that both recur together AND flow
+    together fall in one cluster. Consecutive same-cluster beats collapse into
+    a segment; sub-minimum segments merge into a neighbour (see below); labels
+    are then assigned A, B, C... by first appearance.
+
+    Pure DSP + spectral clustering - no learned weights, nothing mutated.
+
+    CAVEATS worth knowing before trusting the output:
+      - `k` (default 5) is the number of distinct section TYPES, fixed
+        regardless of song length. A song with 7 real sections gets 5.
+      - It segments TIMBRE + REPETITION, not harmony or phrase. A section
+        boundary here means "the texture changed", which usually but not
+        always coincides with a musical section.
+      - Boundaries land on beat times from librosa's own beat tracker, so they
+        inherit its errors and are only as precise as +/- one beat.
+      - Returns [] for audio under 8 s or with fewer than k+2 beats.
+
+    NOTE ON CONSUMING IT: `check.run_check` writes each note's section as an
+    annotation carrying the label AND the instance index and boundaries. Read
+    the index when you need to tell one occurrence of A from another - the bare
+    label alone cannot distinguish them, which previously made the form
+    impossible to reconstruct from annotations (§XVIII).
+    """
     import librosa
     import scipy.ndimage
     import scipy.linalg
@@ -105,13 +134,51 @@ def detect_form(engine, track, min_section_s: float = 4.0, k: int = 5) -> List[S
             raw.append([lab, a, b])
         else:
             raw[-1][2] = b
-    # merge sub-min segments into the previous one
-    merged: List[List] = []
-    for seg in raw:
-        if merged and (seg[2] - seg[1]) < min_section_s:
-            merged[-1][2] = seg[2]
-        else:
-            merged.append(list(seg))
+    # Merge sub-minimum segments into a NEIGHBOUR, choosing which one on
+    # evidence rather than always folding into whatever came before.
+    #
+    # The old rule was `merged[-1][2] = seg[2]` unconditionally: a too-short
+    # segment was always absorbed by its predecessor and its own label thrown
+    # away. Two consequences, both wrong:
+    #   - a brief return of A between two B sections got absorbed into B,
+    #     erasing the recurrence the whole module exists to find;
+    #   - the FIRST segment could never merge (nothing precedes it), so a short
+    #     opening survived while an identical short segment mid-song did not -
+    #     the rule was asymmetric in time.
+    # Now: prefer the neighbour that SHARES the short segment's label (a brief
+    # A between Bs rejoins A), else the longer neighbour, and a short leading
+    # segment merges forward. Iterated shortest-first so one merge can enable
+    # the next.
+    merged: List[List] = [list(s) for s in raw]
+    if merged:
+        while len(merged) > 1:
+            durations = [s[2] - s[1] for s in merged]
+            i = int(np.argmin(durations))
+            if durations[i] >= min_section_s:
+                break
+            prev_i, next_i = i - 1, i + 1
+            if prev_i < 0:
+                target = next_i
+            elif next_i >= len(merged):
+                target = prev_i
+            elif merged[prev_i][0] == merged[i][0]:
+                target = prev_i
+            elif merged[next_i][0] == merged[i][0]:
+                target = next_i
+            else:
+                target = (prev_i if (merged[prev_i][2] - merged[prev_i][1])
+                          >= (merged[next_i][2] - merged[next_i][1]) else next_i)
+            merged[target][1] = min(merged[target][1], merged[i][1])
+            merged[target][2] = max(merged[target][2], merged[i][2])
+            merged.pop(i)
+        # a merge can leave two adjacent segments sharing a label - fuse them
+        fused: List[List] = []
+        for seg in merged:
+            if fused and fused[-1][0] == seg[0]:
+                fused[-1][2] = seg[2]
+            else:
+                fused.append(list(seg))
+        merged = fused
     # relabel by first appearance -> A, B, C ...
     order: dict = {}
     sections: List[Section] = []

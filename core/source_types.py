@@ -61,3 +61,8 @@ class Provenance(str, Enum):
 
     # User-supplied - a hard lock, never re-arbitrated (§2.7 "guided means guided")
     GUIDED = "guided"
+
+    # Grimlock University - the pattern-study layer (GRIMLOCK_UNIVERSITY.md).
+    # OFF by default; STUDY observes and logs; APPLY additionally lets the
+    # NOTATION view honor what was found. Never mutates a Note in any mode.
+    GRIMLOCK_UNIVERSITY = "grimlock_university"

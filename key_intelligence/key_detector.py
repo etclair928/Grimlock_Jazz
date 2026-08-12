@@ -98,9 +98,19 @@ def _weighted_chroma_mean(chroma: np.ndarray) -> np.ndarray:
     return np.sum(weighted, axis=1) / np.sum(weights)
 
 
-def _correlate_with_key(chroma: np.ndarray, profile: np.ndarray, key_idx: int) -> float:
-    """Pearson correlation with the rotated key profile."""
-    rotated_profile = np.roll(profile, -key_idx)
+def _correlate_with_key(chroma: np.ndarray, profile: np.ndarray, pitch_class: int) -> float:
+    """Pearson correlation between the chroma and the key profile rotated
+    so its TONIC sits at `pitch_class`.
+
+    BUG FIX (2026-08-06, §XVII.2): this was `np.roll(profile, -key_idx)`,
+    which is wrong twice over. MAJOR_PROFILE/MINOR_PROFILE are written
+    tonic-first (index 0 = tonic), and chroma index 0 = C, so the tonic
+    must be moved TO `pitch_class` - that is `np.roll(profile, +pc)`. The
+    negative sign instead placed it at `12 - pc`, which only coincides
+    with the truth for pc 0 and 6. Proven with a synthetic test: a pure
+    A-flat-major profile was reported as "E".
+    """
+    rotated_profile = np.roll(profile, pitch_class)
     chroma_mean = np.mean(chroma)
     profile_mean = np.mean(rotated_profile)
     numerator = np.sum((chroma - chroma_mean) * (rotated_profile - profile_mean))
@@ -139,11 +149,27 @@ def detect_key(chroma: np.ndarray) -> KeyResult:
     if np.sum(avg_chroma) > 0:
         avg_chroma = avg_chroma / np.sum(avg_chroma)
 
+    # BUG FIX (2026-08-06, GRIMLOCK_6.0_OPEN_PROBLEMS.md §XVII.2): the
+    # profile must be rotated by the key's PITCH CLASS, not by its index
+    # in these lists. KEYS_MAJOR/KEYS_MINOR are in circle-of-fifths order
+    # (deliberately, so that index i is always a relative major/minor
+    # pair - C/Am, G/Em, ...), but _correlate_with_key does
+    # np.roll(profile, -key_idx), which is a CHROMATIC shift. Passing the
+    # list index therefore tested the wrong profile for any key whose
+    # index != its pitch class:
+    #     6 of 12 MAJOR keys were mislabeled by a TRITONE (G, A, B, Db,
+    #     Eb, F), and ALL 12 MINOR keys were wrong (off by 3 or 9).
+    # Measured consequence: prospering reported E (true Ab major),
+    # Hopeful reported Bm (true Bb minor) - both confirmed against an
+    # independent transcription. key_idx is still carried through for the
+    # relative-pair check below, which DOES depend on list position.
     candidates: List[Tuple[float, str, bool, int]] = []
     for key_idx, key in enumerate(KEYS_MAJOR):
-        candidates.append((_correlate_with_key(avg_chroma, MAJOR_PROFILE, key_idx), key, False, key_idx))
+        pitch_class = NOTE_TO_PITCH_CLASS.get(key, key_idx)
+        candidates.append((_correlate_with_key(avg_chroma, MAJOR_PROFILE, pitch_class), key, False, key_idx))
     for key_idx, key in enumerate(KEYS_MINOR):
-        candidates.append((_correlate_with_key(avg_chroma, MINOR_PROFILE, key_idx), key, True, key_idx))
+        pitch_class = NOTE_TO_PITCH_CLASS.get(key.rstrip('m'), key_idx)
+        candidates.append((_correlate_with_key(avg_chroma, MINOR_PROFILE, pitch_class), key, True, key_idx))
 
     candidates.sort(key=lambda c: -c[0])
     best_correlation, best_key, best_is_minor, best_idx = candidates[0]
@@ -207,10 +233,60 @@ def key_fit(pitch: int, key_result: KeyResult) -> Tuple[bool, float]:
     return False, 0.98
 
 
+def chroma_from_notes(notes, n_frames: int = 200) -> np.ndarray:
+    """Build a 12 x n_frames chromagram from TRANSCRIBED NOTES instead of
+    from mix audio.
+
+    WHY (measured 2026-08-06, GRIMLOCK_6.0_OPEN_PROBLEMS.md §XVII.2): the
+    audio path (`analyze_key`) reads chroma off the FULL MIX, where drums
+    and percussion smear the pitch-class profile - and it was wrong on
+    both songs we could check against an independent transcription
+    (prospering: reported E, actual Ab major; Hopeful: reported Bm, actual
+    Bb minor - a semitone off). Our own transcribed notes are 90-99%
+    diatonic, a far cleaner signal we already compute and were throwing
+    away.
+
+    Deliberately produces a real TIME SERIES, not a single averaged
+    vector, so detect_key's existing opening/closing edge weighting
+    (_weighted_chroma_mean) and its relative-major/minor tie-breaker keep
+    working unchanged. Drums are excluded: their pitch values are
+    percussion slot ids, not tonal content.
+    """
+    pitched = [n for n in notes
+               if getattr(getattr(n, "stem", None), "value", str(getattr(n, "stem", ""))) != "drums"]
+    if not pitched:
+        return np.zeros((12, 1), dtype=np.float32)
+
+    span_end = max(float(n.end_ms) for n in pitched)
+    span_start = min(float(n.start_ms) for n in pitched)
+    span = max(1.0, span_end - span_start)
+    frames = max(1, int(n_frames))
+    chroma = np.zeros((12, frames), dtype=np.float32)
+
+    for note in pitched:
+        start = float(note.start_ms); end = max(start + 1.0, float(note.end_ms))
+        pc = int(note.pitch) % 12
+        f0 = int((start - span_start) / span * (frames - 1)) if frames > 1 else 0
+        f1 = int((end - span_start) / span * (frames - 1)) if frames > 1 else 0
+        f0 = max(0, min(frames - 1, f0)); f1 = max(f0, min(frames - 1, f1))
+        # Weight by real sounding duration, spread across the frames it covers.
+        per = (end - start) / 1000.0 / max(1, (f1 - f0 + 1))
+        chroma[pc, f0:f1 + 1] += per
+    return chroma
+
+
+def analyze_key_from_notes(notes, n_frames: int = 200) -> KeyResult:
+    """Key from our own transcribed notes (see chroma_from_notes). Reuses
+    detect_key verbatim - only the evidence changes, not the logic."""
+    return detect_key(chroma_from_notes(notes, n_frames=n_frames))
+
+
 __all__ = [
     "KeyResult",
     "detect_key",
     "analyze_key",
+    "analyze_key_from_notes",
+    "chroma_from_notes",
     "key_fit",
     "KEY_FIT_ANNOTATION_KIND",
     "KEY_CONFIDENCE_THRESHOLD",

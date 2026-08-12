@@ -588,3 +588,1378 @@ The graph is **elegant infrastructure for a problem a trivial greedy fix solves 
 The ceiling is **XV.1's entropy 0.68** — voice is under-determined by the cheap cues, so *no* solver (greedy, graph, or flow) gets a clean answer. Real progress needs either far stronger cues (a learned voice model / transformer) or accepting that genuinely dense polyphony is dense on the page. The graph is not the unlock; the missing information is.
 
 **Through-line, extended:** the detection layer has now survived a full pipeline change (the merge) without regression, and survived two hostile architecture reviews with its core laws intact. Everything still open is downstream of the notes and upstream of the page.
+
+---
+
+## XVI. The page session — engraving, the University, and the Klangio benchmark (2026-07-30 → 2026-08-06)
+
+*The first session aimed squarely at §XIII.4's second axis (the page). It ended
+by inverting the diagnosis: the notes were never the problem.*
+
+### XVI.0 Built and verified
+
+- **`output/playability.py`** — two-hand physical feasibility per instant. Pure,
+  reusable as an objective function.
+- **`output/piano_reduction.py`** — hysteresis-Viterbi register split (treble/bass
+  boundary with a switch penalty), a **≤4 rhythmic-independence voicer**, and
+  gesture cohesion. Same-rhythm notes become chord tones; divergent rhythm
+  becomes a voice; >4 overlap merges rather than spilling a staff.
+- **Per-stem staff routing** (`build_routed_score`) — each stem its own staff;
+  grand staff only where earned (keyboard/guitar timbre or the merged `other`);
+  bass capped at 2 voices; drums their own staff.
+- **`university/`** — Grimlock University: read-only pattern study, null-model
+  grading, purpose-built melodic streaming, opt-in APPLY. OFF is byte-identical
+  to Jazz.
+- **Intermediate pickle + `tools/reexport_notation.py`** — notation iteration went
+  from ~80 minutes to seconds. This is what made everything else here measurable.
+
+### XVI.1 Measured negatives — myths killed, recorded so we don't retry
+
+- **Playability is NOT the bottleneck.** Harmonic content is **86–99% two-hand
+  playable**; true >10-finger impossibility is **0–1.2%**; mean simultaneity ~3.3.
+  The "dense unplayable cluster dump" does not exist. **The mush is HORIZONTAL**
+  (fragmentation), not vertical (density). This killed the note-dropping
+  reduction the engraving design was originally built around.
+- **Unbounded legato is over-sustain.** Filling every gap drove rest/note to 0.02
+  but playability **97% → 33%**. Bounded legato (≤1 beat) is the keeper.
+- **`pedal_point` grades NOISE** on all three songs (lift 0.34/0.72/1.3) —
+  demoted. Same-pitch adjacency arises by chance in a small pitch vocabulary.
+- **`rearticulation` finds 0 runs with consolidation ON, 63 with it OFF** —
+  `note_consolidation` already absorbs exactly what it targets. Retained as a
+  probe for whether consolidation is working.
+- **Voice cohesion helps layout, not content**: gestures kept intact 34→53%
+  (Hopeful), 45→56%, 34→48%; note counts unchanged ±4.
+
+### XVI.2 NEW — the null model is a partial answer to §VI
+
+> A detector that fires as often on **shuffled** notes as on real music is
+> detecting nothing.
+
+Destroy the structure a detector claims (pitch-shuffle for melodic, time-shuffle
+for rhythmic), keep everything else, compare firing rates. **No ground truth, no
+labels, ~10× cheaper than the injection–recovery harness (§IX.2)** — and it
+directly decides dead / noise / real / too-loose.
+
+It earned its place immediately by catching four things, **three of them ours**:
+
+1. **A bug in the harness itself** — grading a *melodic* detector against a
+   *time*-shuffle is meaningless (the pitch sequence survives), which masked
+   `scale_run`'s real 8.65× lift as "NOISE". Each detector now declares which
+   nulls actually destroy its structure.
+2. **A bad detector** — `arpeggio` v1 fired **more** on shuffled pitches (0.153)
+   than on real music (0.111): any three leaping notes often form some triad
+   under some rotation. Tightened → REAL on all three songs.
+3. **A useless detector** — `pedal_point`, demoted.
+4. **Its own blind spot** — the first vertical detector (`chord`) fired 29/52/12
+   times and received **no grade at all**, because the model only ran detectors
+   on melodic lines. An ungraded detector had silently entered the curriculum.
+
+**Tiering is now a measurement, not an opinion:** GRADUATED (unanimous REAL) may
+alter the page; PROVISIONAL (mixed) may publish but **not move a notehead**;
+FAILED is demoted.
+
+### XVI.3 NEW — streaming was the real ceiling on pattern discovery
+
+The curriculum read lines from `voice_continuity.stream_into_lines`, which is a
+**consolidator for instrument identity, not a melodic-line finder**: any sustain
+overlap starts a new line, and its 300 ms gap is absolute (a beat at 148bpm is
+405 ms). Lines averaged **1.8–2.2 notes**, so any ≥4-note detector was nearly
+unreachable.
+
+A purpose-built reader (onset succession, sustain overlap tolerated,
+beat-relative gap, **45 ms chord guard so block chords never read as arpeggios**)
+raised notes-in-a-usable-line from **29–43% → 68–81%**, mean line 2.19 → 4.89.
+**Coverage roughly doubled before a single new detector was added** — and every
+detector still graded REAL, so longer lines revealed patterns rather than
+manufacturing them. `voice_continuity` is untouched.
+
+**Generalizable lesson:** we were measuring detectors against an artificially
+starved input. Fix the input's *reachability* before tuning its consumers.
+
+### XVI.4 NEW — the Klangio benchmark (the most valuable external datum to date)
+
+Four-way comparison on *Heavy Rotation Vibez* (user-confirmed ground truth:
+**piano, drums, bass, trumpet**, plus soft background horns).
+
+**Where Klangio wins, decisively:**
+- **rest/note 0.08 vs our 0.79** — a 10× cleaner page.
+- **Proper unpitched percussion** (1,045 hits, `display-step`, rest/note 0.02).
+  Ours emits *pitched* MIDI 36–42 on a normal staff — wrong notation, and our
+  worst staff.
+- A real 2-staff grand staff for piano.
+
+**Where Klangio fails:**
+- **19% of its output is duplicated** — `Guitar P1 ≡ P2` (766 notes) and
+  `Bass P3 ≡ P4` (305) are byte-identical part copies.
+- **Invented instruments.** It reports Guitar, Violin and Wind; none exist. Its
+  "Violin" spans **MIDI 28–107 — seven octaves**, impossible for any wind or
+  string instrument: a *contaminated bin* holding the trumpet plus ~112 notes
+  that cannot belong to it. Its confidently-named part is the messy one; its
+  vaguely-named "Wind" is the clean horn line (97.5% within trumpet range).
+  **This is §XII.1's label instability, shipped as a product feature.**
+
+### XVI.5 NEW — the baseline-choice error (the methodological trap, third bite)
+
+Scored against **BP-on-the-mix**, our pipeline looked like 2.07× over-detection.
+Scored against the **stem-sum baseline** — the standing law, *raw stems → Basic
+Pitch* — the picture inverts:
+
+| | notes vs stem-sum | sounding-time |
+|---|---|---|
+| **Jazz** | **1.00×** (4,500 / 4,516) | 0.87× |
+| **Klangio** | **0.76×** (drops ~24%) | 1.15× |
+
+§XII.4 recorded loudness-confounded evaluation as "a trap that bit twice." This
+is the third bite in a new costume: **the baseline you choose determines the
+verdict.** An arbitrary threshold compounded it — a bounded-legato variant was
+flagged "OFF" at sndT/BP 1.69–1.95 while **Klangio ships at 2.68×**; our fidelity
+bar was stricter than the commercial product's.
+
+*(Honest caveat: the 1.00× is offsetting differences, not clean equivalence — the
+merge removes ~1,183 harmonic notes while our drum engine adds ~600 over BP's
+113, plus gains on vocals/bass.)*
+
+### XVI.6 NEW — rest clutter is a LAYOUT property, not a transcription property
+
+Measured across both systems, rest/note is essentially a function of
+**voices-per-staff**:
+
+| voices/staff | rest/note |
+|---|---|
+| 1 (Klangio) | **0.02–0.12** |
+| 2 (our bass line) | 0.37 |
+| 4 (our staves) | **0.79–1.15** |
+
+Every voice must account for *all* time on its staff, so three of four voices are
+resting at any instant. The linked mechanism is **chord-tone share — Klangio
+31–57%, us 10–15%**: a chord tone stacks onto an existing notehead, consuming no
+rhythmic slot and generating no rests. **We split into voices what Klangio stacks
+into chords.**
+
+This explains the entire 10× rest gap **without reference to note quality**, and
+means the largest available win is fidelity-free: **chord-stack on the quantized
+grid rather than on raw-ms proximity** (we group within 30–45 ms *then* quantize;
+notes landing in the same 16th slot are already co-located on the page).
+
+### XVI.7 NEW — our over-detection filters are inert
+
+On *Heavy Rotation Vibez* (4,500 notes): `micro_note_purge` flagged **0**,
+`schoenberg` noise/hallucination **0**, `note_support` **3.5%**. Three quality
+gates, all built and wired, finding essentially nothing; dropping every flagged
+note still leaves 4,343.
+
+Per §XVI.5 we may not *need* them for fidelity — but if we ever want to reduce
+for **readability**, we currently have **no working mechanism**. This is
+`pedal_point`'s disease at pipeline scale: sophisticated machinery calibrated too
+conservatively to ever act.
+
+### XVI.8 The reframe — a truth machine judged as a notation engine
+
+> Every reflex that makes us faithful — freeze the note, don't drop, don't
+> invent, demand evidence before acting — is exactly the reflex that makes the
+> page cluttered.
+
+We hold ~4,500 baseline-accurate notes and render them badly. Klangio holds
+~3,400 (having editorially discarded a quarter) and renders them beautifully.
+**Klangio is a worse transcriber and a better engraver.** The gap is not
+perception, not detection, not even voicing algorithms — it is **editorial
+nerve**: the willingness to decide that a *correct* note does not belong on the
+page. The frozen-note law governs the detection floor; we let it leak into
+notation policy, where it does not apply and never should have.
+
+### XVI.9 NEW — there is still no readability objective
+
+Everything we optimize is fidelity (baseline ratios) or validity (null models).
+§XIII.4 said evaluation is two axes; **we only ever built metrics for one.** No
+page-quality target has ever been written down, so nothing has ever moved toward
+one. Candidate axes, all cheap and already computable: rest/note, noteheads per
+beat per staff, voices per staff, chord-tone share, tie count, clef/split churn.
+The ear remains the oracle for musicality — but readability is measurable, and
+Klangio establishes what the achievable range looks like.
+
+### XVI.10 Revised leverage ranking (supersedes XIV.5)
+
+1. **Chord-stack on the quantized grid** (§XVI.6) — the single largest page win,
+   **zero fidelity cost**. Target chord share 15% → ~40%, cascading into fewer
+   voices and fewer rests.
+2. **Proper unpitched percussion notation** (§XVI.4) — free, unambiguous, and
+   currently our worst staff.
+3. **Define the readability objective** (§XVI.9) — without it, 1 and 4 cannot be
+   scored, and we will keep optimizing correctness by default.
+4. **Voices-per-staff policy: cap at 2, spill to more staves** (§XVI.6) — an
+   honest trade (taller score), now priceable against a benchmark.
+5. **Recalibrate the fidelity guardrail** (§XVI.5) — thresholds must be
+   benchmarked, not invented; there is measured headroom for moderate sustain.
+6. **Meter correctness as a cleanliness lever** — we read HRV as 107bpm 6/4,
+   Klangio as 100bpm 4/4 (far more plausible for the material). Wrong barlines
+   manufacture ties and rests, so a meter error costs the page twice.
+7. **Instrument naming without double-counting** — transcribe the merged stem (no
+   duplication), then *label* notes by per-stem energy at their own f0. This
+   would beat Klangio outright: names, with no phantom Violin and no duplicate
+   parts.
+8. **Voice separation via stronger cues** — unchanged from §XV.4: entropy 0.68 is
+   the ceiling; the missing information, not the solver, is the blocker.
+9. **Injection–recovery harness** (§IX.2) — still unbuilt, but §XVI.2 shows a
+   cheaper falsification instrument exists for anything detector-shaped.
+
+**Through-line, extended:** the detection layer has now survived the merge, two
+hostile audits, an engraving rebuild, and a head-to-head against a commercial
+product — and against the correct baseline it sits **at parity**. Everything
+still open is downstream of the notes and upstream of the page, and this session
+finally established which of those two the remaining work belongs to: **the page,
+and specifically the willingness to edit it.**
+
+---
+
+## XVII. Same-recording head-to-head vs Klangio — and a key-detection bug (2026-08-06)
+
+*§XVI compared us to Klangio on one song we had transcribed and it had not. Then
+four more Klangio exports arrived, two of them **the identical source recordings
+we run** (Hopeful, prospering) and one a **different performance of a song we
+had transcribed** (Prospering (Cover)). That combination is a genuinely new
+evaluation instrument, and it produced the first hard bug this whole comparison
+has found — in us.*
+
+### XVII.0 NEW — two ground-truth-free evaluation instruments
+
+1. **Same-recording head-to-head.** Both systems consume identical audio, so
+   *every* difference is attributable to the system. No performance variance, no
+   separation variance.
+2. **Cross-version agreement.** Two different *performances* of the same song,
+   transcribed by two different *systems*. Convergence on key, progression and
+   pitch-class profile is evidence both are right — with no labels.
+
+Together with the null model (§XVI.2), that is now **three** partial answers to
+§VI's "no accessible loss function," none of which needs ground truth. The null
+model falsifies *detectors*; these two corroborate *readings*.
+
+### XVII.1 Content agreement is HIGH — the systems validate each other
+
+| comparison | pitch-class correlation |
+|---|---|
+| Hopeful — **same recording**, ours vs Klangio | **r = +0.975** |
+| Prospering — **different recording**, ours vs Klangio's cover | **r = +0.948** at zero transposition |
+
+The cover comparison peaks at **+0.948 with no transposition** (runner-up +0.806
+at +5 semitones, which is only the subdominant sharing 6 of 7 tones). Bass roots
+match too — ours A♭/F/E♭/D♭, the cover's E♭/A♭/F/D♭: the same **I–vi–V–IV** in
+A♭ major. **Our transcription captures the song's identity, not merely the
+audio** — an independent performance transcribed by an independent system lands
+on the same harmonic DNA.
+
+### XVII.2 NEW BUG — key detection is wrong on both songs, and our own notes know better
+
+Krumhansl key-fitting run on each system's **own transcribed notes**:
+
+| song | our reported key | our NOTES say | Klangio reported | Klangio's NOTES say |
+|---|---|---|---|---|
+| prospering | **E** | **G♯/A♭ major** (r=+0.888) | A♭ major | A♭ major |
+| Hopeful | **Bm** | **A♯/B♭ minor** (r=+0.80) | A♭ major | A♯/B♭ major/minor |
+
+- **prospering:** 98.9% of our sounding time lies inside the A♭-major scale, every
+  non-scale tone under 0.6% — and we labelled it **E**. Klangio and our own notes
+  agree on A♭; only our *label* dissents.
+- **Hopeful:** both systems' notes point to **B♭ minor** (G♭ outweighs G in both
+  profiles, the B♭-minor signature). We reported **B minor — a semitone sharp.**
+  Klangio reported A♭ major, which shares 6 of 7 tones but misses root and mode.
+
+**Mechanism:** `analyze_key` reads **chroma from the full mix**, where drums and
+percussion smear the profile. Our *transcribed notes* are 90–99% diatonic — a far
+cleaner signal that we already compute and then ignore. **Detect key from our own
+notes** (or fuse notes-key as a witness against mix-chroma-key). Small, and now
+validated on two songs against an independent system.
+
+This is §XVI's thesis again in a new place: **we compute better evidence than we
+consume.**
+
+### XVII.3 Meter — Hopeful CORROBORATED, Heavy Rotation Vibez is ours to fix
+
+- **Hopeful:** we read **148bpm 6/4**; Klangio reads **3/4**. These are the *same
+  pulse* — 6/4 is two 3/4 bars. Our meter is **corroborated**, and the §XVI
+  suspicion that our 6/4 readings are systematically wrong is **withdrawn**.
+- **Heavy Rotation Vibez:** we read **6/4**, Klangio **4/4**. Those are *not*
+  compatible, and 4/4 is far more plausible for the material. That one is a
+  genuine error, and it stays on the leverage list (§XVI.10 item 6).
+
+The lesson for the referee: a meter "disagreement" must be checked for
+*metrical equivalence* before being scored as a conflict.
+
+### XVII.4 DECISIVE — rest clutter is layout, proven on identical audio
+
+On **Hopeful**, from the same recording:
+
+| | unique noteheads | rest/note | staves × voices | chord-tone share |
+|---|---|---|---|---|
+| **Jazz** | 5,495 | **0.79** | 5 staves × up to 4 voices | 10–15% |
+| **Klangio** | **~8,880 (1.6× MORE)** | **0.10** | 10 staves × mostly 1 voice | 41–54% |
+
+**Klangio emits 1.6× more notes than we do and still has eight times fewer rests
+per note.** This eliminates every remaining explanation involving note quality,
+over-detection or density. Rest clutter is **purely a layout policy**: voices per
+staff, and whether simultaneities are stacked as chord tones or split into
+voices. §XVI.6 hypothesised this; this measurement proves it on identical input.
+
+### XVII.5 Klangio's failure mode is systematic — four files, one pattern
+
+Across all four exports (Heavy Rotation Vibez, Hopeful, prospering, Prospering
+(Cover)):
+
+- **Duplicate parts, every single time** — `Guitar P≡P` and `Bass P≡P`,
+  byte-identical note sequences. 19% of its output on HRV.
+- **Phantom instruments, every time.** On prospering (ground truth **Bass, Piano,
+  Trumpet, Drums**) it emits **Piano, Guitar, Violin, Wind, Synth** — four of five
+  do not exist. The single trumpet is **fragmented across Violin (652 notes,
+  midi 35–89, 77% coverage), Wind (696, 41–94, 81%) and Synth (420, 41–94, 74%)**:
+  three parts covering nearly the same register, each partial.
+- **This is why the trumpet "feels dropped"** to a reader — not because content is
+  missing (Klangio's harmonic total is **3,661 vs our 1,879, 1.95× MORE**), but
+  because no single staff holds a coherent trumpet line.
+- On HRV its "Violin" spans **seven octaves (midi 28–107)** — a contaminated bin,
+  physically impossible for any one instrument.
+
+**This is exactly §XII.1's separator label instability, shipped as a product
+feature.** Klangio did not solve the identity problem we merge stems to avoid; it
+committed to confident names on top of it. Our refusal to name is *more honest*
+— and §XVI.10 item 7 (transcribe merged, then label by per-stem energy at each
+note's own f0) would let us name defensibly and beat it outright.
+
+### XVII.6 Bass — they drop 38%, we over-range
+
+Same recording, prospering:
+
+| | notes | range | time coverage |
+|---|---|---|---|
+| **Jazz** | **605** | midi **27–77** | **100%** |
+| **Klangio** | 376 (**keeps 62%**) | midi **34–55** | 94% |
+
+Klangio drops **38%** of the bass, and its 3 missing windows are all in the first
+15 s (plausibly a genuine bass-free intro). But its range is **tight and
+realistic** (B♭1–G3) while **8 of our bass notes sit above G4** — implausible for
+a bass instrument.
+
+So: **we are more complete, they are more disciplined.** Symphony carried a
+`FAMILY_PITCH_RANGE_MIDI` plausibility check for exactly this; **Jazz has no
+equivalent.** Porting it is cheap, is annotation-only, and closes a defect this
+comparison made visible.
+
+### XVII.7 What the head-to-head establishes
+
+Stated plainly, because it settles what the remaining work actually is:
+
+> **We are the better transcriber. Klangio is the better engraver.**
+
+- **Content:** we are at parity with the stem baseline (§XVI.5, 1.00×), we agree
+  with an independent system at r=0.975 on identical audio, and we agree with an
+  independent *performance* at r=0.948. Our content is sound.
+- **Identity:** Klangio invents instruments and duplicates parts on every file;
+  we invent nothing. Our restraint is correct, but it currently costs us all
+  labelling — which is a solvable problem, not an inherent trade.
+- **Page:** Klangio wins decisively and for reasons that have **nothing to do
+  with hearing** — more staves, fewer voices per staff, aggressive chord
+  stacking, and proper unpitched percussion.
+- **Labels:** both systems get key wrong on the same material while both systems'
+  *notes* are right. Nobody's reported key should be trusted over its own notes.
+
+**Everything Jazz still needs is downstream of the notes.** The detection layer
+has now been externally corroborated twice; the remaining work is the page, the
+labels, and the discipline to use evidence we already produce.
+
+### XVII.8 Additions to the leverage ranking (extends XVI.10)
+
+- **NEW 2a. Detect key from our own notes** (§XVII.2) — a real bug, wrong on 2/2
+  songs, with the better signal already computed. Cheap and immediately testable
+  against both prospering recordings and Hopeful.
+- **NEW 6a. Port `FAMILY_PITCH_RANGE_MIDI` range plausibility** (§XVII.6) —
+  annotation-only, catches our out-of-range bass notes.
+- **Item 6 refined:** meter errors must first be tested for *metrical
+  equivalence* (6/4 vs 3/4 is agreement, not conflict). HRV's 6/4-vs-4/4 remains
+  a genuine error.
+- **Item 7 strengthened:** naming is no longer a "nice to have." Klangio proves
+  the market expects instrument names *and* that naming badly (phantom Violin,
+  a trumpet split three ways) is worse than not naming. Labelling merged content
+  by per-stem energy is the one place we could straightforwardly surpass it.
+
+### XVII.9 FIXED (2026-08-06) — the key-detection bug was worse than diagnosed
+
+§XVII.2 blamed the *input* (mix chroma). Building the notes-based path
+disproved that: it returned the **same wrong answers**, which meant the fault
+was in `detect_key` itself. Two independent bugs, both now fixed:
+
+1. **Index-vs-pitch-class.** `KEYS_MAJOR`/`KEYS_MINOR` are in circle-of-fifths
+   order (deliberately - index *i* is a relative major/minor pair), but
+   `_correlate_with_key` did `np.roll(profile, -key_idx)`, a *chromatic* shift.
+   Passing the list index tested the wrong profile whenever index != pitch
+   class: **6 of 12 major keys were mislabeled by a TRITONE** (G, A, B, Db, Eb,
+   F) and **all 12 minor keys were wrong** (off by 3 or 9 semitones).
+2. **Rotation sign.** The profiles are tonic-first and chroma index 0 = C, so
+   the tonic must be rolled TO the pitch class (`+pc`); `-pc` placed it at
+   `12-pc`, correct only for pc 0 and 6. Caught by a synthetic test: a *pure
+   A-flat-major profile* was reported as "E".
+
+**Verification.** A 24-key synthetic round-trip (build each key's pure profile,
+require `detect_key` to name it back) now passes **24/24**; before the fix it
+passed 1. On real material, against the independent Klangio reading:
+
+| song | before | after | independent check |
+|---|---|---|---|
+| Hopeful | Bm | **Bbm** | notes + Klangio |
+| prospering | E | **Ab** | notes + Klangio |
+| Heavy Rotation Vibez | B | Em | (Klangio says Ab - unresolved) |
+
+**Also wired:** `analyze_key_from_notes` / `chroma_from_notes` build a real
+12 x N chromagram from transcribed notes (drums excluded), so `detect_key`'s
+edge-weighting and relative-key tie-breaker keep working. The Conductor now runs
+it as a **second witness** after transcription and takes the more confident
+reading, logging both. Guided key remains a hard lock (§2.7).
+
+**Lesson recorded:** a synthetic round-trip test would have caught this the day
+the module was written. `detect_key` was described in its own docstring as "the
+pure, testable core" - and had no test.
+
+### XVII.10 FIXED (2026-08-06) — pitch-range plausibility ported
+
+`instrument_attribution/range_check.py`, annotation-only, keyed by **stem** (not
+the brightness-bucket family, which cannot support a range claim). Generous
+bounds: bass **23-67**, vocals **36-88**; the merged harmonic stem is left
+unconstrained on purpose.
+
+Measured: **3 / 70 / 100** implausible notes on Hopeful / prospering / HRV. The
+bass flags are the ones §XVII.6 predicted (8 on prospering, 34 on HRV, up to
+midi 83). The vocals flags turned out to be **low**, not high - 51 and 61 notes
+**below C2**, with minima at **midi 21 and 27 (A0, D#1)**. No human voice
+produces those: that is bass bleed into the vocals stem or an octave error, and
+it is a second defect this check surfaces for free. The high vocal bound was
+loosened 84 -> 88 after measuring that only 1-2 notes per song exceed it (real
+falsetto/harmony, not artifacts).
+
+Nothing is dropped - the verdict exists for the engraver or a future reducer,
+which is precisely the "working mechanism" §XVI.7 said we lacked.
+
+### XVII.11 BUILT (2026-08-06) — the readability objective finally exists
+
+`output/readability.py` scores an emitted MusicXML on six axes, each with a
+reference value measured from the Klangio head-to-head rather than invented:
+rest ratio, chord share, max voices/staff, tempo marks, unpitched drums,
+overfull measures. §XIII.4 named this second axis; §XVI.9 recorded that we had
+never built a metric for it. It exists now, and it earned its keep within the
+hour by falsifying the very next thing we tried.
+
+It also caught that **Klangio emits 7-9 tempo marks per score** - the same
+system-level-object-per-part sloppiness we had, so that defect is industry-wide,
+not ours alone. (Ours is fixed: 5 -> 1.)
+
+### XVII.12 MEASURED NEGATIVE — chord-stacking on the quantized grid does NOT work
+
+§XVI.10 ranked "chord-stack on the quantized grid" as leverage **#1**, "the
+single largest page win, zero fidelity cost," predicting chord share 15% -> 40%.
+Implemented at BOTH ends - `musicxml_exporter._chord_events_gridded` and the
+voicer's own `piano_reduction._chord_events` (grouping by snapped onset+end
+instead of raw 40 ms / 90 ms tolerances). Measured on prospering:
+
+| variant | rest/note | chord share |
+|---|---|---|
+| raw-ms grouping (before) | 0.876 | 0.180 |
+| grid grouping, exporter | 0.876 | 0.181 |
+| grid grouping, voicer | 0.884 | **0.172** |
+
+**No improvement; marginally worse.** The prediction was wrong. Grouping
+tolerance was never the binding constraint - by the time the exporter groups,
+`piano_reduction.assign_voices` has already committed each note to a voice, and
+the exporter can only chord-group *within* a voice that is already decided.
+
+The code is kept (it is more principled than raw-ms proximity and is a no-op
+when tempo is unknown), but it is **not** the lever, and leverage item #1 is
+hereby demoted.
+
+### XVII.13 CONFIRMED — voices-per-staff IS the lever (leverage #4 promoted to #1)
+
+The same mechanism §XVI.6 identified, attacked from the correct end. Sweeping
+`max_voices` on prospering:
+
+| cap | rest/note | chord share | notes |
+|---|---|---|---|
+| 4 (current default) | 0.884 | 0.172 | 3,626 |
+| 3 | 0.748 | 0.177 | 3,637 |
+| **2** | **0.560** | 0.202 | 3,679 |
+| 1 | 0.345 | 0.269 | 3,631 |
+
+Monotonic, and it generalises - cap 4 -> 2 across all three songs:
+
+| song | before | after | change |
+|---|---|---|---|
+| prospering | 0.884 | 0.560 | **-37%** |
+| Hopeful | 0.953 | 0.666 | **-30%** |
+| Heavy Rotation Vibez | 0.793 | 0.489 | **-38%** |
+
+Note counts stay flat (within 1%): **no content is lost, only re-laid-out.**
+Chord share *rises* as the cap falls, because fewer voices forces simultaneities
+to merge into chords - so the chord-share goal of §XVII.12 is achieved as a
+by-product of the voice cap, not by tuning grouping windows. **The two levers
+were always one lever.**
+
+**Recommended default is cap = 2, NOT the best-scoring cap = 1.** Cap 1 scores
+better on every axis but forces every simultaneity into a block chord, which
+destroys the melody-over-held-chord independence that makes syncopation
+readable - the exact failure mode rejected in the engraving doc §13.2. Cap 2
+halves the rests while preserving genuine two-voice piano writing. This is a
+visible change to every page, so it is left as an explicit parameter pending an
+eye/ear check rather than silently switched.
+
+**Method note worth keeping:** the readability metric was built *before* the
+change it was meant to score, and it immediately falsified the author's own
+top-ranked hypothesis. That is the null model's lesson (§XVI.2) applied to
+engineering priorities rather than detectors.
+
+### XVII.14 The page-fix session (2026-08-06) — five wins, four negatives
+
+Driven almost entirely by the user's eye and ear on real exports. Every item
+below is measured on prospering unless noted.
+
+**WINS (shipped):**
+
+| fix | before | after |
+|---|---|---|
+| key detection (2 real bugs, §XVII.9) | Bm / E | **B-flat m / A-flat** - both now match independent evidence |
+| voices per staff (§XVII.13) | 4 | **2** |
+| tempo marks (system object emitted per part) | 5 | **1** |
+| drum notation | pitched MIDI 36-42 | **`<unpitched>` + percussion clef**, kick F4 / snare C5 / hi-hat G5 + x noteheads |
+| sustain (user chose "C_beat" by ear) | dry, fill=0 | **fill=1.0 beat** |
+| **rest/note (combined)** | **0.876** | **~0.41 (-53%)** |
+
+`output/readability.py` (§XVII.11) is what made all of this scoreable.
+
+**NEGATIVES (recorded so they are not retried):**
+
+1. **Chord-stacking on the quantized grid does nothing** (§XVII.12). Predicted
+   as leverage #1; delivered 0.876 -> 0.884.
+2. **"One grid per measure" for tuplets is a REGRESSION** - reverted. Forcing a
+   measure containing any tuplet beat wholly onto thirds pushed binary material
+   onto k/3: prospering nonsense ratios 4 -> 7 and bad measures 0 -> 3; Hopeful
+   exploded to 1502 triplets, nine distinct nonsense ratios, 22 bad measures.
+3. **Metric-boundary fill is metric-negative.** The user's rule ("a figure
+   landing on the AND shouldn't leave a rest to the barline - write the 8th
+   out") is musically right and IS implemented, but rest COUNT rose 1790 ->
+   1837 and sustain 1.61x -> 1.74x raw. Mechanism: a longer note holds its
+   voice longer, so the next note cannot reuse that voice -> more voices ->
+   more rests. **Kept anyway**, because rest-count is the wrong metric for the
+   request - it measures how MANY rests exist, while the complaint is about
+   rest DURATION after a note. Left ON pending the ear.
+4. **Chord collapse has no measurable effect.** Requiring an exact end-cell
+   match really did tear ragged block chords into separate voices, and the fix
+   is unit-tested both ways (ragged chord -> 1 slot; 16th-vs-whole -> 2 slots).
+   But on real data chord share moved 0.180 -> 0.182: by the time the voicer
+   runs, `assign_hands` has already split chords across the two staves and
+   consolidation has merged what it could. Correct code, wrong assumption about
+   where theproblem lived.
+
+**Side effect worth knowing:** the chosen sustain raises notehead count 3,627 ->
+4,519 (+25%) because longer notes cross barlines and split into tied notes. The
+page is smoother and *denser* at once.
+
+**Residual tuplet nonsense (4 notes of 2,773 on prospering: 12:11, 12:7).**
+Three exporter-side attempts failed. 12 = lcm(3,4), so these arise where
+rhythm_inference's PER-BEAT tuplet verdicts put k/3 and k/4 positions in one
+measure. **The fix belongs upstream in tuplet detection, not in the exporter** -
+stop patching the symptom.
+
+**Method note.** Four of the user's page observations this session ("choppy",
+"events don't line up", "why the red boxes", "block chords should be one voice")
+each turned out to name a REAL defect - two of them bugs no metric had flagged
+(the per-part tempo marks; the two different sustain policies applied to
+different staves in the same score). The eye is finding defects faster than the
+metrics are. The metrics' job is to stop us shipping a fix that does not work -
+which they did, four times today.
+
+### XVII.15 ROOT CAUSE — why triplets read as 16th pickups, and what ReverseGeoCrypt can actually see
+
+*User observation (2026-08-06): "tuplets and triplets get interpreted as 16th
+note pickups... ReverseGeoCrypt was designed to figure these sorta things out so
+I thought." Traced. The instinct is right that this is where the answer lives;
+the conclusion is that **ReverseGeoCrypt is structurally incapable of detecting
+an evenly-played tuplet**, and has never been the thing producing our triplets.*
+
+**What it actually measures.** `lattice_witness._compute_ratios` compares
+**consecutive IOIs to each other** (`ioi[i+1] / ioi[i]`, plus the i+2 skip),
+KDE-peaks the resulting ratios, and matches peaks against family ideals:
+
+```
+binary:     [1.0, 2.0, 0.5, 4.0, 0.25]
+ternary:    [1.3333, 0.6667, 0.3333, 2.6667]
+swing:      [1.5, 0.6667, 3.0]
+quintuplet: [1.25, 0.8, 2.5]
+septuplet:  [1.1429, 0.875, 2.2857]
+```
+
+**The structural blindness.** Three *evenly played* triplets have IOI ratios of
+**1.0, 1.0** - each note equally spaced from the last. And `1.0` is the FIRST
+ideal under **binary**. So an even triplet is mathematically indistinguishable
+from even eighths under this test. A consecutive-IOI-ratio measure can only
+detect **uneven** figures (swing 1.5, dotted 3.0); it is blind to even tuplets by
+construction - and even tuplets are most of the triplets in this repertoire.
+
+**Two aggravating implementation details:**
+
+1. The scoring loop `break`s on the first matching family and `binary` is first
+   in the dict, so binary gets first claim on every peak near 1.0 / 2.0 / 0.5 -
+   the most common ratios in any music.
+2. `0.6667` appears in **both** ternary and swing, but ternary is checked first,
+   so **swing can essentially never win on that ratio**.
+
+**The evidence matches exactly.** Across the seven saved intermediates,
+`ratio_family` is **`binary` on six** and **`quintuplet` on one**
+(`A_Strangers_Smile`, a 62bpm 6/4 worship track - almost certainly wrong;
+quintuplet's 1.25 and ternary's 1.3333 differ by less than
+`RATIO_MATCH_TOLERANCE = 0.1`, so they collide). **Never once ternary or swing.**
+
+**How that becomes "16th note pickups" on the page.** Three evenly-spaced onsets
+in a beat -> ratios 1.0 -> classified binary -> the notation quantizer snaps them
+to the nearest **16th** grid -> 0, 1/3, 2/3 lands as 0, 0.25, 0.5/0.75. That IS a
+16th-note pickup figure. The user is hearing the classifier's blind spot
+rendered as notation.
+
+**Where ratio_family is actually consumed** (modestly, and never destructively):
+- `resolve_denominator(numerator, ratio_family)` and `estimate_time_signature` -
+  simple vs compound meter.
+- `musicxml_exporter`: `ratio_family in {ternary, swing}` can only **ADD**
+  triplet permission, never remove it (that gate was deliberately left un-ANDed,
+  §XIV, precisely because it reads binary everywhere).
+
+So for tuplets it is effectively **inert**. Every triplet we currently emit comes
+from `quantization.rhythm_inference`, which does the structurally right thing:
+it evaluates a **whole beat** against filling templates - including
+`BeatFilling("eighth_triplet", (0.0, 1/3, 2/3), is_tuplet=True)` - with a +3
+complexity penalty so a tuplet must clearly out-explain the binary fillings.
+
+**The reframe.** Tuplet detection must be **beat-relative, not ratio-relative**:
+the question is *"how many onsets fall inside this beat, and at what phase?"* -
+three evenly-spaced onsets in a beat is a triplet regardless of what consecutive
+ratios say. ReverseGeoCrypt should be understood and used as an **uneven/swing
+detector and a lattice-period witness**, NOT as a tuplet detector. Its
+`ratio_family` output should not be treated as tuplet evidence at all.
+
+**This also explains the residual nonsense tuplet ratios** (§XVII.14: 12:11,
+12:7, 4 notes of 2,773). They appear exactly where `rhythm_inference`'s per-beat
+verdict says triplet while neighbouring beats say binary, putting k/3 and k/4
+positions in one measure (12 = lcm(3,4)). Three exporter-side attempts to fix
+that failed because **the exporter is the wrong layer** - it is faithfully
+rendering a mixed-grid decision made upstream.
+
+**Consequences for the leverage ranking:**
+- **Do not** gate anything further on `ratio_family` as a tuplet signal; it
+  cannot carry that load. (Its meter use is fine and stays.)
+- The honest tuplet lever is **strengthening `rhythm_inference`'s per-beat
+  verdict** (its confidence, and consistency between adjacent beats), not
+  post-hoc repair in the exporter.
+- A swing/uneven detector is the one thing ReverseGeoCrypt's ratio test *is*
+  suited to - and `swing_ratio` is already measured independently by
+  `rhythm_engine.estimate_groove`, so the two should be cross-checked rather
+  than both trusted blindly.
+
+---
+
+## XVIII. Project audit — what is resolved, what is dead, where the synergy is (2026-08-06)
+
+*A real audit: import graph from the Conductor, function-level call analysis,
+and an annotation write/read trace across all 95 modules.*
+
+### XVIII.0 RETIRED — problems that are now actually resolved
+
+| was | status |
+|---|---|
+| **§XVI.9** "no readability objective exists" - the §XIII.4 second axis, unbuilt for months | **RESOLVED.** `output/readability.py`: 6 axes (rest ratio, chord share, max voices/staff, tempo marks, unpitched drums, overfull measures), each benchmarked against Klangio rather than invented. |
+| **§XVII.2** key detection wrong on 2/2 songs | **RESOLVED.** Two real bugs in `detect_key`: the profile was rotated by LIST INDEX instead of pitch class (6/12 major keys off by a tritone, all 12 minor keys wrong) and the rotation SIGN was inverted. Synthetic round-trip 1/24 -> **24/24**. Hopeful Bm -> **B-flat m**, prospering E -> **A-flat**, both matching Klangio and our own note content. |
+| **§XVI.10 item 2** drums notated as pitched MIDI 36-42 | **RESOLVED.** `<unpitched>` + percussion clef, kick F4 / snare C5 / hi-hat G5, x noteheads - the same placement Klangio produced on identical audio. |
+| **§XVI.10 item 4** voices-per-staff policy | **RESOLVED.** Default `max_voices=2`. rest/note **0.876 -> ~0.41 (-53%)** with note counts flat. |
+| tempo marks (system object emitted per part) | **RESOLVED.** 5 -> 1. (Klangio emits 7-9; the defect is industry-wide.) |
+| **§XVI.10 item 1** chord-stack on the quantized grid | **RETIRED AS REFUTED**, not solved (§XVII.12). Implemented at both ends, delivered 0.876 -> 0.884. Demoted off the leverage list. |
+| **§XVII.6** instrument-range plausibility absent in Jazz | **PORTED** (`range_plausibility`) - but see XVIII.2: it is written and never read. |
+
+### XVIII.1 DEAD CODE: essentially none
+
+Function-level analysis flagged 20 public functions as "never called outside
+their own module." **19 are false positives:**
+
+- **Same-file internal APIs** - `build_music21_score`, `assign_hands`,
+  `two_hand_feasible`, `build_timeline`, `search_lattice`, and all six
+  `schoenberg_mirror.analyze_*` helpers (each called by `audit_note`).
+- **Dynamic dispatch** - the 10 `university/detectors.py` entries are invoked
+  through the `DETECTORS` registry dict, which no regex can see.
+
+**Exactly one genuinely unused function: `university/streams.py::line_stats`** -
+a diagnostic helper written during the streaming measurement. Harmless; keep or
+delete.
+
+**No unreachable modules.** All 95 are reachable from `orchestration/conductor.py`.
+
+This is worth stating plainly because it contradicts the usual expectation for a
+codebase this size: **Jazz has no dead-code problem.** What it has is the
+opposite - live code whose *output* nobody consumes.
+
+### XVIII.2 THE REAL FINDING — six annotation kinds are WRITTEN AND NEVER READ
+
+This is §XIV.4's "signals computed and consumed by nobody," now quantified by
+tracing every `ANNOTATION_KIND` from writer to reader:
+
+| annotation | written by | read by | note |
+|---|---|---|---|
+| `acoustic_activity` | conductor (AnechoicMa) | **nobody** | frame-level silence / resonance / activity probability |
+| `key_fit` | conductor (Key Intelligence) | **nobody** | per-note in-key membership + weight |
+| `duration_hypothesis` | conductor (duration_witness) | **nobody** | symbolic duration + probability |
+| `range_plausibility` | conductor | **nobody** | just ported; MuseScore already draws these red for us |
+| `wobble_group` | conductor (PitchWobbleCollapse) | **nobody** | vocals-only, deliberately parked |
+| `pattern_study` | University | **nobody** | by design - it is the corpus |
+
+Everything else (`instrument_family`, `consolidation`, `notation_timing`,
+`onset_refinement`, `sustain_extension`, `tie_candidate`, `note_support`,
+`harmonic_legitimacy`, `legitimacy_verdict`, `quantization`, `voice`,
+`pattern_voice_cohesion`, `pattern_page_suppress`) has a real consumer.
+
+So: **five live evidence streams, produced every run, that change nothing.**
+
+### XVIII.3 WHERE THE SYNERGY IS — three connections worth making
+
+Ranked by how directly they solve a problem we already have.
+
+**1. `acoustic_activity` -> gate the legato fill.** *(highest value)*
+This session set `fill_max_beats` **by ear**, blanket-filling every gap under one
+beat. But AnechoicMa already measures, per time window, whether the audio is
+genuinely silent or still resonating. That is exactly the missing evidence: fill
+a gap when the stem is still ringing, leave it as a rest when it is truly
+silent. It converts our one remaining hand-tuned aesthetic threshold into a
+measured decision, and it is the honest version of the "more sustain" fix the
+user asked for (§XVII.14 negative #3) - the same goal, evidence-driven instead
+of blanket.
+
+**2. `range_plausibility` -> stem re-routing, not just flagging.**
+The check flags 61 out-of-range notes on the vocals staff and 10 on bass. The
+vocals outliers are **sub-C2, down to A0** - that is not a vocalist, it is bass
+bleed sitting in the wrong stem. MuseScore already colours these red on the page,
+so an external tool is doing our validation for us. Routing a range-implausible
+note to the staff whose range it *does* fit would fix a real misattribution
+rather than merely annotating it.
+
+**3. `key_fit` -> enharmonic spelling.**
+Spelling (F-sharp vs G-flat) was identified as a required sub-problem in the very
+first engraving design and never built; music21 currently guesses. `key_fit`
+already computes per-note key membership against a now-CORRECT key (XVIII.0), so
+the input exists. This is the cheapest path to accidentals that read properly.
+
+*(`duration_hypothesis` could cross-check the notation quantizer; `wobble_group`
+stays parked per standing user decision.)*
+
+### XVIII.4 State of Grimlock Jazz
+
+**Detection layer: externally corroborated, at parity.** Against the correct
+stem-sum baseline we sit at **1.00x** while Klangio is 0.76x; on identical audio
+the two systems agree at **r=0.975** on pitch-class content, and across two
+different performances of the same song at **r=0.948**. The frozen-note law and
+the merge have survived every audit. *Nothing in detection is the bottleneck.*
+
+**Page layer: much improved, still behind.** rest/note **0.876 -> ~0.41**, max
+voices 4 -> 2, real percussion notation, one tempo mark, 0 overfull measures on
+prospering. Klangio still reads cleaner (0.06-0.10) - and §XVII.4 established
+that the remaining gap is **staff count** (they use 9-10 single-voice staves; we
+use 5), which is a structural choice about page shape, not a threshold.
+
+**Labels: one bug fixed, one gap open.** Key is now correct. Instrument naming
+remains deliberately absent - and the Klangio comparison vindicated that
+restraint (it invents Guitar/Violin/Wind/Synth on every file and duplicates two
+parts every time), while also showing the opportunity: label the merged content
+by per-stem energy and we would name defensibly where they cannot.
+
+**Tuplets: root-caused, not fixed** (§XVII.15). ReverseGeoCrypt structurally
+cannot see an even tuplet; `rhythm_inference`'s per-beat verdict is the only real
+tuplet evidence and is where the work belongs.
+
+**Tooling.** `tools/` has grown 10 scripts with real overlap -
+`run_hopeful_full.py` is now subsumed by `run_full.py`, and
+`run_hrv_analysis.py` / `run_hrv_pipeline_only.py` are single-song scaffolding.
+Consolidating to `run_full.py` + `reexport_notation.py` + the three measurement
+tools (`readability`/`playability`/`university_report`) would cut the surface
+without losing capability.
+
+### XVIII.5 Revised leverage ranking (supersedes XVI.10 / XVII.8)
+
+1. **Wire `acoustic_activity` into the legato gate** (XVIII.3 #1) - replaces the
+   last hand-tuned aesthetic threshold with measured evidence.
+2. **Wire `range_plausibility` into stem routing** (XVIII.3 #2) - fixes real
+   misattribution; MuseScore is already showing us the errors.
+3. **Strengthen `rhythm_inference`'s per-beat tuplet verdict** (§XVII.15) - the
+   only honest tuplet lever; stop patching the exporter.
+4. **More staves for harmonic content** - the entire remaining rest gap
+   (§XVII.4). A page-shape decision that needs the user's eye, not a metric.
+5. **`key_fit` -> enharmonic spelling** (XVIII.3 #3) - now unblocked by the key fix.
+6. **Instrument naming by per-stem energy** - the one place we could clearly
+   surpass Klangio.
+7. **Injection-recovery harness** (§IX.2) - still unbuilt; the null model
+   (§XVI.2) covers anything detector-shaped more cheaply.
+
+**Through-line:** the codebase is not carrying dead weight - it is carrying
+**unconsumed evidence**. Five live signals change nothing today, and three of
+them map directly onto problems we are currently solving by hand-tuning. The
+next real gains are wiring, not building.
+
+---
+
+## XIX. Retrospective — the proposal that started this arc, measured against what happened (2026-08-07)
+
+*The whole engraving arc began with a pasted essay arguing that Grimlock's
+problem was no longer DSP but **musical organization** - that we had left Music
+Information Retrieval and entered **Computational Music Engraving**, and that the
+missing piece was a "Musical Structure Discovery" pass between quantization and
+voice separation, whose job was **semantic compression**: notes -> patterns ->
+voices, optimizing not "recover every note" but "produce the score a copyist
+would write."*
+
+*We then spent the arc actually testing it. Recording the result, because the
+scorecard is unusual: the diagnosis was right, the prescription was not, and the
+one claim it made most confidently is the one we falsified hardest.*
+
+### XIX.1 What it got right - confirmed independently
+
+- **"The problem is organization, not separation."** Quantified: against the
+  stem-sum baseline we sit at **1.00x** while Klangio is 0.76x, and on identical
+  audio the two systems agree at **r=0.975** on pitch-class content. The
+  detection layer is externally corroborated. §XVI.8 reached the same sentence
+  from the opposite direction - *a truth machine judged as a notation engine*.
+- **"You need an explicit cost function for engraving."** Built
+  (`output/readability.py`, §XVII.11), benchmarked against a shipping product
+  rather than invented. It was the single most useful artifact of the arc,
+  because it began **falsifying the author's own hypotheses within the hour**.
+- **"Three different optimization problems have been conflated"** (acoustic
+  accuracy / musical analysis / engraving compression). This framing is sound
+  and is now how the leverage list is organized.
+
+### XIX.2 What we measured that CORRECTS it
+
+**1. The prescribed cure underdelivered.** The Musical Structure Discovery pass
+was built - it is Grimlock University. It discovers scale runs, arpeggios,
+sequences, neighbour tones and ostinati with null-model-validated detectors, at
+22-25% coverage. In APPLY mode it moved **7 noteheads out of ~4,000**. Gesture
+cohesion improved intactness 34% -> 53%: real, but local.
+
+Meanwhile **rest/note fell 0.876 -> ~0.41** from three blunt, non-musical
+changes: cap voices per staff at 2, notate drums as unpitched percussion, and
+set a sustain policy.
+
+Most pointedly, the essay's own example - *"instead of four voices, ask: can this
+be one chord?"* - was implemented **twice** (exporter and voicer) and delivered
+**0.876 -> 0.884, i.e. nothing** (§XVII.12). What actually merged chords back
+together was capping the voice count, which forced merging as a side effect.
+
+> **The pattern layer is real and worth keeping. It was not the breakthrough.
+> Layout policy was.**
+
+**2. Two terms in its proposed cost function are in direct opposition.** It
+rewards *"long continuous melodic streams"* while penalizing *"excessive
+rests."* Measured (§XV.3): coherent voices **honestly rest** when their line is
+silent, so register-continuity voicing RAISED the rest ratio 1.10 -> 1.24. And
+§XVII.13 showed rest count is largely a *function of voices-per-staff*, not an
+independent axis. These cannot both be maximized; the objective has to choose.
+
+**3. The claim we falsified hardest:** *"Notice what's missing from that list:
+audio. At this stage you're no longer doing signal processing."*
+
+The arc's best single fix was wiring audio back **in**. The choppiness the user
+heard was attacked twice with thresholds and got wrong both times; the actual fix
+was consulting AnechoicMa's resonance-vs-silence evidence to decide whether a gap
+is a real rest or a cut-off artifact (§XVIII.3 #1). The engraving layer needed
+*more* acoustic evidence, not less. Signal processing had not stopped being
+relevant - it had stopped being **consulted** (five annotations written and never
+read, §XVIII.2).
+
+### XIX.3 The natural experiment nobody planned: Klangio
+
+Klangio is this essay's thesis shipped as a product - aggressive simplification,
+confident musical objects, semantic compression. Measured against it on identical
+audio (§XVII): it reads **10x cleaner** (rest/note 0.06-0.10 vs our 0.79 at the
+time) **and** invents Guitar/Violin/Wind/Synth on a track containing
+piano/bass/trumpet/drums, duplicates 19% of its output verbatim, drops 24% of
+detected content, and files a trumpet into a seven-octave "Violin" bin.
+
+> **"Produce the score a copyist would write" is the right objective - but a
+> copyist compresses from KNOWLEDGE of what the music is. Simulate that
+> confidence without the knowledge and the failure mode is not a worse page; it
+> is a beautiful page that lies.**
+
+This is the strongest argument for our restraint on instrument naming, and
+simultaneously the clearest picture of what we are still losing on the page.
+
+### XIX.4 The lesson worth carrying forward
+
+**A sophisticated diagnosis does not imply a sophisticated cure.** The essay
+diagnosed the disease correctly and named the field correctly, then assumed the
+remedy had to match the diagnosis in sophistication. Measured, the effect
+ordering was the reverse:
+
+1. **Layout policy** (voices/staff, percussion notation, staff count) - cheap,
+   blunt, largest wins.
+2. **Evidence wiring** (audio consulted at the page layer) - medium, and the fix
+   for the defect the user's ear actually caught.
+3. **Pattern discovery** - real, null-validated, and so far the *smallest*
+   effect.
+
+And one thing neither party anticipated: **four of the defects fixed in this arc
+were found by the user's eye and ear, not by any metric** - per-part tempo marks,
+two different sustain policies applied to different staves of one score, nonsense
+tuplet ratios (24:13, 12:7), and block chords torn into separate voices over
+inaudible release differences. The metrics' role turned out to be *stopping bad
+fixes from shipping* - which they did four times - not finding the defects.
+
+**Standing rule this suggests for the next big proposal:** rank candidate fixes
+by measured effect before by conceptual depth, and build the scoreboard before
+the fix it is meant to score.
+
+---
+
+## XX. THE READABILITY GAP - the #1 goal, the ten hypotheses, and why the University cannot close it (2026-08-08/09)
+
+*Standing directive from this session: **closing the readability gap with
+Klangio is now the first priority, above everything else.** Detection is
+finished as a problem. We hear what is there. We cannot organise it on a page.*
+
+*This section states the problem precisely, records the measured gap across four
+songs, gives ten hypotheses for closing it, and answers a question asked
+directly: why has Grimlock University contributed so little to this?*
+
+### XX.1 The gap, measured on four songs
+
+Every number from `output/readability.py` on emitted MusicXML - the artifact a
+human opens - with the coherence axes added 2026-08-08.
+
+| axis | Klangio | ours | our best song | our worst |
+|---|---|---|---|---|
+| rest / note | **0.032 - 0.10** | 0.122 - 0.522 | Nov19 0.122 | End Transmission 0.522 |
+| top-line stability | **0.663 - 0.701** | 0.339 - 0.579 | Nov19 0.579 | End Transmission 0.339 |
+| voice 1 is the tune | **0.539 - 0.776** | 0.403 - 0.517 | Nov19 0.517 | Federal 0.453 |
+| max voices | **2** | 3 | - | - |
+| beams emitted | **2226** | 741 | - | - |
+| chord share | 0.225 - 0.45 | 0.135 - 0.364 | - | - |
+
+And what it costs Klangio to get there - also measured, also on four songs:
+
+| defect | Klangio | ours |
+|---|---|---|
+| duplicated output | **15.3%, 19%, 20.1%** | **0%** |
+| invented instruments | Violin, Wind, Synth, Guitar x2, Bass x2 | none |
+| tempo marks | 8 - 15 | **1** |
+| overfull (corrupt) measures | 1 - 12 | **0** |
+| content vs stem-sum baseline | 0.76x on one song, **2.07x** on another | 1.00x |
+
+### XX.2 The problem, stated exactly
+
+**We notate the PERFORMANCE. A copyist notates the INTENT.**
+
+Every structural choice we made is correct for a truth machine and wrong for an
+engraver:
+
+- A note ends where its ENERGY DECAYS (Basic Pitch), not where the player
+  stopped. Measured: **63.6% of consecutive notes overlap the next one**, median
+  104ms. An interval partition cannot put two overlapping events in one voice,
+  so a legato line is FORCED to alternate voices. This single fact caused the
+  fragmented melody we chased all session.
+- Onsets are where energy rose, not where the beat is. Measured with a
+  phase-invariant statistic: **onset alignment to the tempo grid is R = 0.03**,
+  which is essentially none. We are notating un-quantised performance time and
+  asking the page to make sense of it.
+- Every detected note is written. Klangio drops 24% on one song and
+  more than doubles another; we are at 1.00x on all of them. Faithful, cluttered.
+- One tempo and one time signature for the whole song. Klangio emits 8-15 tempo
+  marks. Measured on End Transmission: two contiguous 8-bar regions
+  (21.4-34.6s, 108.1-121.5s) are NOT in 4 - corroborated across the drum stem and
+  the mix independently, plus a shared bar of 3 at 47.5s. We bar all of it as 4/4.
+
+**Klangio reads better because it COMMITS.** It quantises hard, caps at two
+voices, extends notes to the next onset, names instruments, and drops what does
+not fit. Its failure mode is the price of that: a beautiful page that lies.
+Ours is the mirror - an honest page nobody can read.
+
+Â§XVI.8 already drew the boundary this needs: the frozen-note law governs the
+DETECTION FLOOR. The page is a VIEW and is allowed editorial judgement, provided
+the performance clock stays untouched. **We wrote that down and then kept
+notating like a truth machine anyway.** The gap is the distance between that
+sentence and the code.
+
+### XX.3 Ten hypotheses to close the gap
+
+Ranked by measured evidence first, conceptual appeal last - the standing lesson
+of Â§XIX.
+
+**1. Cap voices per staff at 2.** MEASURED on two songs, both directions: cap 2
+beats cap 3 on rest ratio, top-line stability AND voice1-is-top, losing only
+mean_voice_jump (End Transmission 0.518 -> 0.418 rest, 0.370 -> 0.432 stability;
+Federal 0.198 -> 0.157, 0.419 -> 0.501). We REJECTED cap 2 previously on
+`mean_voice_jump` alone - the metric now proven blind to melodic coherence.
+Klangio's max_voices is 2 on every song. Cheapest real win available.
+
+**2. Notate durations from the GRID, not from the audio.** A note lasts until
+the next note in its voice unless evidence says otherwise. The legato fill and
+the 0.5-beat overlap tolerance are partial versions; the general policy is that
+note ENDS are an engraving decision, not a measurement. This is the single
+biggest lever on rest ratio, which is our worst axis.
+
+**3. Quantise onsets before the page sees them.** R = 0.03 means we hand the
+notation layer un-gridded time. No layout policy can fix rhythm that was never
+snapped. This is upstream of 1, 2 and 9 and may be the true root cause.
+
+**4. Per-measure meter and tempo.** `TempoMeter` carries ONE numerator;
+`resolve_meter` returns one. End Transmission demonstrably needs at least three
+regions. Klangio's 8-15 tempo marks are not a defect to beat - they are it
+tracking something real that we flatten.
+
+**5. An explicit EDITORIAL PASS with a drop budget.** The page is permitted to
+omit. Give it a budget (start at 5%) and spend it on the least-corroborated
+notes. Â§XX.5 below supplies exactly the evidence needed to choose which.
+
+**6. Phrase-scoped voice assignment.** Voices are currently assigned greedily
+across the whole staff, so a voice's identity must survive every rest in the
+song. Reset at phrase boundaries and a voice only has to be coherent within a
+phrase - which is all a reader needs.
+
+**7. Beaming as a first-class decision.** We emit 741 beams to Klangio's 2226.
+Beams are how a reader parses rhythm; a third as many is a third of the rhythmic
+signposting. Currently whatever music21 does by default.
+
+**8. Enharmonic spelling from the key.** `key_fit` is computed every run and read
+by nobody. Both systems show prominent B-naturals in flat keys. Cheap, visible.
+
+**9. Chord recognition over vertical stacks.** `chord_share` 0.135-0.364 against
+Klangio's 0.225-0.45. Simultaneous notes that share a rhythm should be ONE
+chord in ONE voice, not n voices. Already partly done by `_chord_events`;
+the tolerance (40ms onset / 90ms offset) is a guess never swept.
+
+**10. Instrument naming by defensible evidence.** The one axis where we can
+beat Klangio outright rather than catch up: it invents Violin and Wind on a
+trumpet record. Name only what per-stem energy and timbre support, and say
+"unknown" otherwise.
+
+### XX.4 Why Grimlock University comes up short
+
+Asked directly, and the honest answer is structural rather than a matter of
+tuning. In APPLY mode the University moved **7 noteheads out of ~4,000**.
+
+**It operates on the wrong object.** It finds patterns in the NOTE STREAM. Every
+measured page defect is about DURATION, VOICE ASSIGNMENT and RHYTHMIC SPELLING.
+Knowing that five notes form a scale run does not tell you whether to write them
+as sixteenths or triplets, where the note ends, or which voice they belong to.
+
+**It is descriptive where engraving is prescriptive.** It labels what is there.
+A copyist decides what to WRITE - which is a different verb, and the only one
+that moves a page.
+
+**Its unit is below the level where page decisions are made.** Detectors work
+over 4-6 note motifs. Voices, staves, beams, rests and barlines are decided over
+measures and phrases. There is no operator connecting a motif to a layout
+choice, and adding one is the actual work.
+
+**It has no vocabulary for the page.** No staff, voice, beam, tie or rest exists
+in `university/`. It cannot express an engraving preference even when it is
+right, so its output has to be translated by a layer that is itself the problem.
+
+**Read-only by contract - correctly, and fatally for this purpose.** The
+contract that made it safe also guarantees it can never be the mechanism.
+
+**What it is actually good for, and should be kept for:** the null-model
+falsification harness is the most rigorous instrument in the codebase. It caught
+`arpeggio` firing MORE on shuffled pitches. Keep it as a MEASURING tool. Stop
+expecting it to be a TRANSFORMING one. Default it OFF.
+
+### XX.5 A new instrument: augmentation consensus (2026-08-09)
+
+Tested this session and it works, which gives hypothesis 5 the evidence it needs.
+
+Transcribe the same audio at three operating points - as-is, and resampled by
++/- 5 semitones - then map every detection back to the original key and tempo.
+Both inverses are EXACT (`t * ratio`, `pitch - 12*log2(ratio)`), and resampling
+is artifact-free because we only re-declare the sample rate; no phase vocoder
+touches the transients. Verified: pitch-class profiles correlate at 0.977-0.997
+after inversion.
+
+Measured on End Transmission:
+
+| bucket | other | median duration | in key |
+|---|---|---|---|
+| all three views agree | 380 | 291 ms | **99.5%** |
+| baseline ONLY | 35 | 232 ms | **85.7%** |
+| both shifted views, NOT baseline | 24 | 277 ms | 100% |
+| one shifted view only | 174 | 148 ms | 96.6% |
+
+**89-95% of our baseline is independently corroborated.** The un-corroborated
+remainder is measurably less musical - in-key drops 99.5% -> 85.7% - which is a
+hallucination signal derived without any ground truth. And 24 long notes have
+two-witness support while the baseline misses them entirely.
+
+This gives the editorial pass a defensible ranking: **drop the un-corroborated,
+keep the confirmed, and consider adopting the twice-witnessed.** It also answers
+the question that opened the augmentation experiment - slowed audio produces
+longer melodic LINES (notes living in phrases of 8+ rose 45.7% -> 56.6%), though
+its rhythmic claim did not survive (grid alignment did not improve).
+
+### XX.6 What this section changes
+
+1. **Readability is the objective now.** Detection is at 1.00x the stem-sum
+   baseline and corroborated by Klangio at r = 0.927-0.983 across four songs. It
+   should not be optimised further without new evidence.
+2. **`mean_voice_jump` may not be used alone to reject a layout change.** It
+   blessed a shredded melody at 4.49 while the top line changed voice on 52% of
+   onsets. It cost us cap 2 for weeks.
+3. **Hypotheses 1-3 are the near-term programme.** 1 is measured and ready. 2 and
+   3 are upstream of everything else on the list.
+
+### XX.7 CORRECTION - clutter is not a note-count problem (2026-08-09)
+
+*Three external reviews were solicited on §XX. Two returned things already
+built. The third returned one observation that corrects this section, so it is
+recorded here rather than folded silently into the list.*
+
+**The observation: Klangio has MORE notes than us and FEWER rests.** Verified
+against our own measurements:
+
+| song | Klangio notes | our notes | Klangio rest/note | our rest/note |
+|---|---|---|---|---|
+| Federal Blvd | 18,446 | 9,983 | 0.032 | 0.198 |
+| End Transmission | 4,923 | 4,123 | 0.057 | 0.496 |
+
+**1.19x - 1.85x more material, 6x - 9x fewer rests.**
+
+This kills a hypothesis that was implicit in most of this document and explicit
+in one item of it: *the page is cluttered because we write too much.* We do not
+write too much. We write a comparable or smaller amount of music and spend far
+more of the page on rests.
+
+Rest ratio is therefore **a function of representation efficiency, not of note
+count** - consistent with what §XVII.13 measured from the other side (rest count
+is largely a function of voices-per-staff) and with the cap-2 result.
+
+**Consequences for §XX.3:**
+
+- **Hypothesis 5 (editorial pass with a drop budget) is DEMOTED.** Dropping the
+  least-corroborated 5% attacks a variable that demonstrably is not the one
+  driving the gap. The augmentation-consensus instrument (§XX.5) remains valuable
+  - as a confidence signal, and for deciding which of two conflicting readings to
+  believe - but "drop notes to clean the page" is now contraindicated by
+  measurement. Klangio proves a page can be dense AND clean.
+- **Hypotheses 1, 2 and 3 are unchanged and reinforced.** All three are about
+  how material is REPRESENTED (voices per staff, where a note ends, where an
+  onset sits), not how much of it there is.
+
+**What the two other reviews returned.** Recorded because the pattern is now
+consistent enough to be worth naming: of nine proposals in the first review,
+eight were already shipping - seeded determinism, harmonic stem merge, native
+MusicXML NotationScore, per-beat adaptive quantisation, null-model detector
+testing, two-axis metrics, and posteriorgram sustain recovery
+(`quantization/sustain_recovery.py`, wired at `conductor.py:316`). Its ninth,
+adaptive CFAR thresholding, is the same fix made this session to the acoustic
+gate: **never compare a score against a constant you did not derive from that
+score's own distribution.** That rule is worth generalising even though the
+proposal was not new. The second review reproduced §XX.6's ordering
+independently, which is mild corroboration of the ordering and nothing more.
+
+**The standing lesson, sharpened:** an external reviewer reading these documents
+will return the documents. The value came from the one review that questioned a
+premise rather than restating the plan.
+
+---
+
+## XXI. The readability push - what shipped, what was falsified, and the measurement that reframed it (2026-08-08 → 08-10)
+
+*Worked §XX's list. Two changes shipped and are measured on the whole library.
+Ten experiments were falsified, three of them because the METRIC was invalid
+rather than the idea. And one number found at the end reframes most of the
+work: the voice layer is not where our information is being lost.*
+
+### XXI.1 Shipped, measured on 9 songs
+
+**Voice cap 2** (`build_routed_score`, default changed from 3).
+`tools/voice_cap_sweep.py` over every saved intermediate - **unanimous, no
+exceptions**:
+
+| | cap 2 | cap 3 |
+|---|---|---|
+| rest / note | **0.342** | 0.432 |
+| top-line stability | **0.518** | 0.446 |
+| voice 1 is the tune | **0.532** | 0.427 |
+| mean voice jump | 4.85 | **4.08** |
+| overfull measures | 0 | 0 |
+
+Note counts move **<0.5%**: cap 2 does not discard music, it represents the same
+music with fewer independent rhythmic layers. Cap 2 had been REJECTED before on
+`mean_voice_jump` alone - the one axis it loses - which is the metric §XX.6
+forbids using as a sole veto.
+
+**Voice overlap tolerance + acoustic-gate repair** (`output/piano_reduction.py`).
+Federal Blvd rest/note **0.305 → 0.191**, SUNO cut **0.209 → 0.122**; top-line
+stability **0.416 → 0.545** and **0.396 → 0.579**; zero overfull measures.
+
+**Two new metrics** (`output/readability.py`): `top_line_stability` and
+`voice1_is_top`. They exist because `mean_voice_jump` read 4.49 - PASSING - while
+the melody changed voice on 52% of onsets. An aggregate over voices structurally
+cannot see WHICH voice carries the line.
+
+### XXI.2 The two real defects behind the fragmented melody
+
+Neither was a missing feature. Both were bugs in shipped code.
+
+**1. A `continue` was shadowing the legato fill.** The acoustic gate branch
+returned early for every note the witness had measured - 73% of them - so those
+gaps got no sustain at all. Wiring the evidence in had made sustain WORSE than
+the blanket threshold it replaced.
+
+**2. 63.6% of consecutive notes OVERLAP the next one**, median 104ms, because
+Basic Pitch ends a note where its energy decays rather than where the player
+stopped. An interval partition cannot put two overlapping events in one voice,
+so a legato line is FORCED to alternate voices. No smarter voice-CHOICE rule can
+fix this; the constraint is occupancy, not preference.
+
+### XXI.3 Falsified - ideas
+
+1. **Register-rank voice assignment.** Musically correct account of a brass
+   section (lead on top, parts holding position). Measured: top-line stability
+   unchanged 0.419 → 0.420, voice1_is_top WORSE 0.413 → 0.299, jump worse.
+   *A correct account of the MUSIC is not automatically a correct account of the
+   BUG.*
+2. **Relabelling voices by mean register.** Also backwards - and instructive:
+   background figures sit HIGHER on average than a lead trumpet, so the
+   highest-mean voice is not the melody. Ranking by top-note share works
+   (+0.02-0.03 v1top), barely.
+3. **The acoustic gate itself.** Properly calibrated it beats "blind flat window"
+   by ~0.005 rest/note. §XIX called wiring audio in the best fix of the engraving
+   arc; measured, that wiring was inert AND harmful. Kept only because it is a
+   consistent hair better and costs nothing.
+4. **Texture classifier v1.** Pitch-shuffling the input changed NOTHING - not one
+   label. Its features were onset-only: a simultaneity-density detector wearing
+   the word "texture".
+5. **Five of six texture dimensions.** After the rebuild, per-dimension
+   replication across songs: `chordality` +1.11/+0.35/(informative on all three);
+   `melodic_motion` FLIPS SIGN (+0.60 on one song, -0.48 on another);
+   `accomp_regularity`, `independence`, `sustain`, `ostinato` inconsistent.
+   Chordality ALONE separates 9-12x better than the six-vector, because five
+   noisy dimensions dilute one good one. **More dimensions is not more
+   information.**
+6. **`motif` as ground truth for "same voice".** Measured: median gap between
+   consecutive same-motif notes is **15,074 ms = 14.6 beats**, and only 11% are
+   within 2 beats. The annotation marks ONE ANCHOR PER OCCURRENCE, not the notes
+   comprising the figure. 159 tagged notes over 19 motifs ≈ 8 occurrences each.
+7. **Test-time augmentation for rhythm.** Resampling to 0.749x (which is exactly
+   -5 semitones, so "slow it down" and "drop a fourth" are ONE artifact-free
+   operation) finds 8-42% more notes and longer melodic LINES (notes in phrases
+   of 8+ rose 45.7% → 56.6%). But phase-invariant onset alignment did not improve
+   - the rhythmic claim failed. The extra notes are 40-50% SHORTER, mechanically
+   explained: at 0.749x speed Basic Pitch's fixed minimum note length corresponds
+   to a 0.749x shorter musical duration.
+
+### XXI.4 Falsified - MEASUREMENTS. Three invalid metrics in one session.
+
+This is the more important list, because each looked reasonable and each was
+caught only by its own numbers.
+
+1. **CV of downbeat spacing, to choose a meter.** Forcing ANY fixed bar length
+   onto steady-tempo music yields evenly spaced downbeats. A 7-beat grid over
+   4/4 scores CV 0.006. The statistic cannot distinguish a correct meter from an
+   incorrect but evenly-divided one.
+2. **An onset-PERMUTING null model.** Permuting onsets among notes preserves the
+   onset MULTISET exactly, so every stack kept its size and the two features
+   under test were bit-identical. The null was invariant to the thing it existed
+   to destroy. Drawing fresh onsets fixed it - and then the null bit.
+3. **A one-sided voice-cap objective.** rest/note falls monotonically as the cap
+   falls (measured on all 23 regions: 0.059 → 0.117 → 0.185 → 0.215 for caps
+   1-4), so cap 1 "won" 23 of 23 regions. That is arithmetic. An objective with
+   no penalty for UNDER-representation always selects the smallest representation.
+
+Also: **churn is the wrong statistic for form-derived regions.** A section
+boundary is by definition where the music changes, so high churn between
+adjacent sections is expected. It was correct for fixed windows and became
+meaningless the moment regions came from `detect_form`.
+
+> **The pattern: it is very easy to build a metric that answers a NEIGHBOURING
+> question.** All three passed casual inspection. Before trusting a new metric,
+> ask what it does on degenerate input - the smallest representation, a rigid
+> grid, a shuffle that preserves the quantity under test.
+
+### XXI.5 The measurement that reframes the rest
+
+`tools/representation_frontier.py` compares notated events against the
+CONSOLIDATED source events across caps 1-4, per region, on five distortion
+channels. On Federal Blvd:
+
+```
+region A#0    onset   duration  overlap  ordering  dropped
+  cap 1      63.215     1.391    0.136     0.000    0.007
+  cap 2      63.215     1.391    0.136     0.000    0.007   <- identical
+  cap 3      63.215     1.493    0.136     0.000    0.007
+```
+
+**Duration distortion is 1.391 - 139%.** Our notated durations differ from the
+consolidated source durations by MORE THAN THE DURATIONS THEMSELVES, and the
+figure barely moves across caps. Onset distortion is a flat 63ms regardless of
+cap. Caps 1 and 2 are frequently bit-identical.
+
+> **The information loss in our pages is dominated by how we notate TIME, not by
+> how many voices we allow.** The whole voice-cap and texture programme is
+> tuning a second-order perturbation on top of a large constant.
+
+Pareto membership (duration/overlap/dropped): cap 1 93.3%, cap 2 86.7%, cap 3
+66.7%, cap 4 53.3%. No cap is dominated everywhere - so a local budget is not
+dead - but with duration distortion at 139% swamping the axes, any frontier
+drawn here is measuring quantisation noise more than representation.
+
+This is direct, quantified support for §XX hypotheses **2 (durations from the
+grid)** and **3 (quantise onsets before the page)** being ranked above the voice
+work, and it is the first hard evidence for WHY.
+
+### XXI.6 What survived, and what it is actually called
+
+The rebuilt probe (`tools/texture_probe.py`) is a CONSUMER: it reads `section`
+for regions, `consolidation` to drop fragments (**a third of every song** -
+36%/33%/28%), `notation_timing` for symbolic simultaneity, `legitimacy_verdict`,
+`instrument_family` and `acoustic_activity`. Version 1 read three fields and
+invented its own windows while 20 annotation streams and ~78,000 annotations sat
+unread in the same pickle - §XVIII.2 with this tool as the offender.
+
+What survives every null we could point at it:
+
+> **Regions of the same section agree on how chord-like their simultaneities
+> are, ~1 SD better than unrelated sections do, and that agreement collapses
+> when pitches are shuffled.**
+
+Federal Blvd +1.11 SD, End Transmission +1.06, Nov19 +0.35. That is real and
+replicated - and it is one dimension, not a texture model. The honest name is
+**chordality persistence**, not texture classification.
+
+### XXI.7 New problems this opened
+
+1. **Duration distortion of 139% is unexplained.** Everything downstream is being
+   judged through that noise. This is now the highest-value measurement
+   available and it needs no new machinery.
+2. **There is NO ground truth for "same voice", and `motif` cannot supply it.**
+   The pairwise-graph / JPDA direction therefore cannot be TESTED, let alone
+   built - per-witness discrimination has no positive set to score against.
+   `tools/texture_probe2.py` implements the edge probe and runs; it simply
+   cannot be scored, and is left in that honest state.
+3. **Mixed meter is unrepresentable.** `TempoMeter` carries one numerator.
+   Measured on End Transmission: two contiguous 8-bar regions (21.4-34.6s,
+   108.1-121.5s) are not in 4, corroborated independently by the drum stem and
+   the mix, plus a shared bar of 3 at 47.5s. The drum stem took 5 only twice in
+   82 bars - and both times inside those windows. We bar all of it 4/4.
+   Separately: `DEFAULT_BEATS_PER_BAR = (3, 4, 6)` never OFFERS 5 or 7.
+4. **Two songs are locked out of every region-based experiment.** `Hopeful` and
+   `prospering` pickles predate section instance identity and store a bare label
+   string. The corpus for anything region-shaped is 3 songs, not 9.
+5. **`instrument_family` is claimed but unused** by the texture vector - which is
+   why family-shuffle moves nothing. Either give it a dimension or stop listing
+   it as consumed.
+6. **Onset alignment is R = 0.03** against the tempo grid, in every augmentation
+   condition including baseline. We hand the notation layer un-gridded time.
+
+### XXI.8 Two instruments worth keeping
+
+- **Augmentation consensus** (`tools/augmented_transcription.py`). Resample by
+  ±5 semitones, transcribe, invert exactly. 89-95% of the baseline is
+  corroborated by at least one shifted view, and the un-corroborated remainder is
+  measurably less musical (in-key **99.5% → 85.7%**) - a hallucination signal
+  derived with no ground truth. Note §XX.7 demotes its original purpose: Klangio
+  carries MORE notes than us with 6-9x fewer rests, so dropping notes is not the
+  lever.
+- **The library-wide sweep** (`tools/voice_cap_sweep.py`). Deciding a layout
+  default on 9 songs instead of the one that happened to be open is what made
+  cap 2 defensible, and would have prevented the original cap-2 rejection.

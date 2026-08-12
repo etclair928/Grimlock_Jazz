@@ -20,7 +20,7 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -32,6 +32,7 @@ from quantization import (
     NOTATION_TIMING_ANNOTATION_KIND, TIE_RECONSTRUCTION_ANNOTATION_KIND,
 )
 from quantization.note_consolidation import CONSOLIDATION_ANNOTATION_KIND
+from acoustic_witness import ACOUSTIC_ACTIVITY_ANNOTATION_KIND
 
 # A voice's notes are monophonic by construction (stream_into_lines only
 # joins a note to a line when it does NOT overlap that line's last note).
@@ -56,6 +57,25 @@ class NotationNote:
     is_tuplet: bool = False   # rhythm_inference's beat-level triplet verdict (not re-guessed)
     tie_start: bool = False   # tie_reconstruction: this note is held into the next same-pitch note
     tie_stop: bool = False    # ...and/or continues a tie from the previous one
+    # Explicit engraving voice (1-based) when an upstream voicer has already
+    # decided it - e.g. piano_reduction's <=4 rhythmic-independence voicer.
+    # When set, the exporter honors it verbatim instead of running its own
+    # greedy fallback voicing (musicxml_exporter._events_to_voices). None =
+    # unchanged legacy behavior (the exporter voices the part itself).
+    voice_index: Optional[int] = None
+    # Grimlock University APPLY: the id of the gesture (scale run, arpeggio,
+    # sequence, Alberti figure) this note belongs to. The voicer keeps one
+    # gesture in ONE voice instead of scattering it - a musical line should
+    # not change stems mid-phrase. None when the University never ran.
+    cohesion: Optional[str] = None
+    # AnechoicMa's evidence about the gap immediately AFTER this note
+    # (acoustic_activity annotation). None when the witness never ran.
+    # resonance high  -> the stem is still ringing: write the note out.
+    # void high       -> genuine silence: the rest is real, keep it.
+    # This replaces a blanket by-ear fill threshold with measured evidence
+    # (GRIMLOCK_6.0_OPEN_PROBLEMS.md XVIII.3 #1).
+    trailing_resonance: Optional[float] = None
+    trailing_void: Optional[float] = None
 
     @property
     def duration_ms(self) -> float:
@@ -89,6 +109,12 @@ class NotationScore:
     # for whether tuplets are permitted at all - triplets on strictly-binary
     # material are almost always a per-note rounding artifact, not real.
     ratio_family: Optional[str] = None
+    # THE MAP between clock time and musical position (core/musical_time.py).
+    # When present the exporter converts through it instead of dividing by
+    # 60000/tempo_bpm, so a note played inside a ritardando lands in the bar it
+    # belongs to. Absent, the old constant-rate behaviour is preserved exactly.
+    # `tempo_bpm` above is then a DISPLAY statistic, not the currency.
+    musical_time: Optional[object] = None
 
     @property
     def total_notes(self) -> int:
@@ -137,6 +163,7 @@ def build_notation_score(
         use_consolidation: bool = True,
         use_notation_timing: bool = True,
         ratio_family: Optional[str] = None,
+        musical_time=None,
 ) -> NotationScore:
     """Groups notes into parts and resolves each note's page timing.
 
@@ -227,7 +254,200 @@ def build_notation_score(
     return NotationScore(
         parts=parts, tempo_bpm=tempo_bpm,
         time_signature=time_signature, key=key, ratio_family=ratio_family,
+        musical_time=musical_time,
     )
+
+
+# ========================================================================
+# Per-stem staff routing (user directive 2026-07-31): each stem gets its
+# own staff; a GRAND STAFF is used only when the stem earns it - it is a
+# keyboard/plucked timbre (guitar/piano/harp) or the merged harmonic
+# "other" junk drawer, OR it is verifiably polyphonic. A melodic/vocal
+# stem stays on ONE staff, and if it has real polyphonic independence it
+# is sorted into Voice 1/2/... BEFORE ever reaching for a grand staff.
+# Bass and drums each get their own single staff. Timbre (the family
+# annotation) and polyphony are the deciders.
+# ========================================================================
+
+# Timbres that warrant a grand staff outright (polyphonic keyboard/plucked).
+_GRAND_STAFF_FAMILIES = {"guitar", "piano", "harp", "keyboard", "keys"}
+# Stems that are grand-staff candidates by identity (the merged harmonic
+# junk drawer, and the un-merged keyboard/guitar heads).
+_GRAND_STAFF_STEMS = (StemType.OTHER, StemType.GUITAR, StemType.PIANO)
+# A voice-worthy amount of simultaneity on a non-keyboard melodic/vocal
+# stem: 3+ notes sounding at once is real independence, not a passing
+# double-stop, so sort it with voices rather than leaving it as chords.
+_POLYPHONY_VOICE_THRESHOLD = 3
+
+
+def _max_simultaneity(nns: List[NotationNote]) -> int:
+    events: List[Tuple[float, int]] = []
+    for n in nns:
+        events.append((n.start_ms, 1))
+        events.append((n.end_ms, -1))
+    events.sort()
+    cur = mx = 0
+    for _, delta in events:
+        cur += delta
+        mx = max(mx, cur)
+    return mx
+
+
+def build_routed_score(
+        notes: List[Note],
+        annotations: AnnotationStore,
+        tempo_bpm: float,
+        time_signature: Tuple[int, int],
+        key: Optional[str] = None,
+        use_consolidation: bool = True,
+        use_notation_timing: bool = True,
+        ratio_family: Optional[str] = None,
+        # MEASURED ON THE WHOLE LIBRARY (2026-08-09, tools/voice_cap_sweep.py):
+        # 9 songs, cap 2 vs cap 3, UNANIMOUS - not one exception.
+        #     cap 2:  rest 0.342  topstab 0.518  v1top 0.532  jump 4.85
+        #     cap 3:  rest 0.432  topstab 0.446  v1top 0.427  jump 4.08
+        # Rest/note -21%, top-line stability +16%, voice-1-is-the-tune +25%, and
+        # note counts move <0.5% - cap 2 does not DISCARD music, it REPRESENTS
+        # the same music with fewer independent rhythmic layers (§XX.7: Klangio
+        # carries 1.19-1.85x our notes with 6-9x fewer rests, so clutter was
+        # never a note-count problem). Klangio's max_voices is 2 on every song.
+        #
+        # Cap 2 loses ONE axis, mean_voice_jump (4.08 -> 4.85). That axis alone
+        # is what rejected cap 2 the first time, before top_line_stability
+        # existed - it read "passing" while the melody changed voice on 52% of
+        # onsets. It may not veto a layout change on its own again (§XX.6).
+        #
+        # The honest cost: a genuine 3-voice contrapuntal passage cannot be
+        # represented. On this repertoire that trade is measurably worth it.
+        max_voices: int = 2,
+        honor_university: bool = False,
+        fill_max_beats: float = 1.0,
+        musical_time=None,
+) -> NotationScore:
+    """Route each STEM to the staff layout it warrants (see header):
+      drums/bass          -> one single staff each
+      other/guitar/piano, or any grand-staff timbre -> GRAND STAFF (reduction)
+      vocals/other melodic: polyphonic -> <=max_voices on one staff;
+                            monophonic  -> one single staff
+    Frozen-note law holds - this builds a NotationScore from notes +
+    annotations and never mutates a Note."""
+    from output.piano_reduction import build_grand_staff, assign_voices
+
+    ms_per_beat = 60000.0 / max(tempo_bpm, 1.0)
+    by_stem: Dict[StemType, List[NotationNote]] = defaultdict(list)
+    stem_family: Dict[StemType, Counter] = defaultdict(Counter)
+
+    # Grimlock University APPLY mode (opt-in, off by default): the page may
+    # drop low-confidence re-strike echoes it identified as one sustained
+    # note, and hold the surviving strike across the run. Frozen Notes are
+    # untouched - this is the notation clock only, so MIDI/playback is
+    # identical either way. When the University never ran, these are empty
+    # and this whole path is a no-op.
+    uni_drop: set = set()
+    uni_extend: Dict[str, float] = {}
+    uni_cohesion: Dict[str, str] = {}
+    if honor_university:
+        try:
+            from university.apply import page_suppression_map
+            from university.observation_types import VOICE_COHESION_ANNOTATION_KIND
+            uni_drop, uni_extend = page_suppression_map(
+                annotations, [n.id for n in notes])
+            for n in notes:
+                value = annotations.latest_value(n.id, VOICE_COHESION_ANNOTATION_KIND)
+                if value and value.get("group"):
+                    uni_cohesion[n.id] = str(value["group"])
+        except Exception:
+            uni_drop, uni_extend, uni_cohesion = set(), {}, {}
+
+    for note in notes:
+        if note.id in uni_drop:
+            continue
+        consolidation = (annotations.latest_value(note.id, CONSOLIDATION_ANNOTATION_KIND)
+                         if use_consolidation else None)
+        if consolidation is not None and consolidation.get("role") == "absorbed":
+            continue
+        family = annotations.latest_value(note.id, FAMILY_ANNOTATION_KIND)
+        is_drum = note.stem == StemType.DRUMS or family == _DRUM_FAMILY
+        if family is None:
+            family = _DRUM_FAMILY if is_drum else "unknown"
+        start_ms, end_ms = _page_timing(note, annotations, use_notation_timing=use_notation_timing)
+        if consolidation is not None and consolidation.get("role") == "primary":
+            end_ms = max(end_ms, consolidation.get("end_ms", end_ms))
+        if note.id in uni_extend:
+            end_ms = max(end_ms, uni_extend[note.id])
+        nt = annotations.latest_value(note.id, NOTATION_TIMING_ANNOTATION_KIND) if use_notation_timing else None
+        is_tuplet = bool(nt.get("is_tuplet", False)) if nt else False
+        acoustic = annotations.latest_value(note.id, ACOUSTIC_ACTIVITY_ANNOTATION_KIND)
+        by_stem[note.stem].append(NotationNote(
+            pitch=note.pitch, start_ms=start_ms, end_ms=end_ms,
+            velocity=note.velocity, source_note_id=note.id, is_tuplet=is_tuplet,
+            cohesion=uni_cohesion.get(note.id),
+            trailing_resonance=(acoustic or {}).get("trailing_resonance"),
+            trailing_void=(acoustic or {}).get("trailing_void"),
+        ))
+        stem_family[note.stem][family] += 1
+
+    # Ties across everything that survived (same rule as build_notation_score).
+    by_source: Dict[str, NotationNote] = {
+        nn.source_note_id: nn for nns in by_stem.values() for nn in nns
+    }
+    for nn in list(by_source.values()):
+        tie = annotations.latest_value(nn.source_note_id, TIE_RECONSTRUCTION_ANNOTATION_KIND)
+        if tie is None:
+            continue
+        target = by_source.get(tie.get("tied_to_note_id"))
+        if target is not None:
+            nn.tie_start = True
+            target.tie_stop = True
+
+    parts: List[NotationPart] = []
+    for stem, nns in by_stem.items():
+        nns.sort(key=lambda n: (n.start_ms, n.pitch))
+        dominant = stem_family[stem].most_common(1)[0][0] if stem_family[stem] else "unknown"
+        is_drum = stem == StemType.DRUMS or dominant == _DRUM_FAMILY
+        label = dominant if dominant not in ("unknown", _DRUM_FAMILY) else stem.value
+
+        if is_drum:
+            parts.append(NotationPart(family=dominant, voice_id=f"{dominant}::all",
+                                      stem=stem, notes=nns, is_drum=True))
+            continue
+
+        # Bass is its own single staff, a bass LINE - never a grand staff and
+        # never 4-part. Basic Pitch emits overtone/artifact simultaneity on
+        # bass that would otherwise trip the polyphony test, so cap it hard at
+        # 2 voices (a real occasional double-stop, nothing more).
+        if stem == StemType.BASS:
+            voiced = assign_voices(nns, max_voices=2, smooth=True, ms_per_beat=ms_per_beat)
+            parts.append(NotationPart(family=dominant, voice_id="bass::line",
+                                      stem=stem, notes=voiced, is_drum=False))
+            continue
+
+        wants_grand = stem in _GRAND_STAFF_STEMS or dominant in _GRAND_STAFF_FAMILIES
+        if wants_grand:
+            # Label the grand staff by a real timbre when we have one, else by
+            # the STEM ("other"/"guitar"/"piano") - never by an internal
+            # brightness-bucket family (mid_body/bright_lead/warm_sustained),
+            # which must not leak onto the page.
+            gs_label = dominant if dominant in _GRAND_STAFF_FAMILIES else stem.value
+            gs = build_grand_staff(nns, tempo_bpm, time_signature, key,
+                                   ratio_family=ratio_family, max_voices=max_voices,
+                                   family=gs_label, fill_max_beats=fill_max_beats,
+                                   beats_per_bar=time_signature[0])
+            parts.extend(gs.parts)
+        elif _max_simultaneity(nns) >= _POLYPHONY_VOICE_THRESHOLD:
+            voiced = assign_voices(nns, max_voices=max_voices, smooth=True,
+                                   ms_per_beat=ms_per_beat, fill_max_beats=fill_max_beats,
+                                   beats_per_bar=time_signature[0])
+            parts.append(NotationPart(family=dominant, voice_id=f"{label}::poly",
+                                      stem=stem, notes=voiced, is_drum=False))
+        else:
+            parts.append(NotationPart(family=dominant, voice_id=f"{label}::all",
+                                      stem=stem, notes=nns, is_drum=False))
+
+    parts.sort(key=lambda p: (p.is_drum, -p.mean_pitch))
+    return NotationScore(parts=parts, tempo_bpm=tempo_bpm,
+                         time_signature=time_signature, key=key, ratio_family=ratio_family,
+                         musical_time=musical_time)
 
 
 __all__ = [
@@ -235,4 +455,5 @@ __all__ = [
     "NotationPart",
     "NotationScore",
     "build_notation_score",
+    "build_routed_score",
 ]

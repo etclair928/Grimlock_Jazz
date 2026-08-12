@@ -36,3 +36,4 @@ class StemType(str, Enum):
     OTHER = "other"            # Demucs 4-stem catch-all
     GUITAR = "guitar"          # htdemucs_6s only
     PIANO = "piano"            # htdemucs_6s only
+    BRASS = "brass"            # external 7-stem separators only

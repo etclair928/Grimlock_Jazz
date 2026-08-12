@@ -79,13 +79,29 @@ def run_check(engine, track, notes: List[Note], annotations: AnnotationStore) ->
     for s in sections:
         label_count[s.label] = label_count.get(s.label, 0) + 1
 
+    # Instance identity: which OCCURRENCE of a label each section is. The
+    # annotation used to carry the bare label ("A"), so every A in the song was
+    # indistinguishable and the form could not be reconstructed from the
+    # persisted annotations - reading back "all notes labelled A" returned one
+    # span covering every A at once (§XVIII). Carrying the index and the
+    # boundaries makes the timeline recoverable by any downstream consumer.
+    instance_of: Dict[int, int] = {}
+    seen_label: Dict[str, int] = {}
+    for i, s in enumerate(sections):
+        seen_label[s.label] = seen_label.get(s.label, -1) + 1
+        instance_of[i] = seen_label[s.label]
+
     notes_labeled = 0
     for n in notes:
         s = _section_of(n.start_ms, sections)
         if s is None:
             continue
-        annotations.add(Annotation(note_id=n.id, kind=SECTION_KIND, value=s.label,
-                                   source=Provenance.CHECK, confidence=1.0))
+        si = sections.index(s)
+        annotations.add(Annotation(
+            note_id=n.id, kind=SECTION_KIND,
+            value={"label": s.label, "index": si, "instance": instance_of[si],
+                   "start_ms": round(s.start_ms, 1), "end_ms": round(s.end_ms, 1)},
+            source=Provenance.CHECK, confidence=1.0))
         notes_labeled += 1
         if label_count.get(s.label, 0) >= 2:
             annotations.add(Annotation(note_id=n.id, kind=REPEAT_GROUP_KIND, value=s.label,

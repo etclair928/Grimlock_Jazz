@@ -6,6 +6,6 @@
 # =================================================================
 
 from separation_engine.demucs_engine import separate
-from separation_engine.stem_merge import merge_harmonic_stems, HARMONIC_STEMS
+from separation_engine.stem_merge import merge_harmonic_stems, load_cached_separation, HARMONIC_STEMS
 
-__all__ = ["separate", "merge_harmonic_stems", "HARMONIC_STEMS"]
+__all__ = ["separate", "merge_harmonic_stems", "load_cached_separation", "HARMONIC_STEMS"]

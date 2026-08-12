@@ -27,7 +27,7 @@
 
 from __future__ import annotations
 
-from typing import Tuple
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 
@@ -91,4 +91,46 @@ def merge_harmonic_stems(separation: Separation) -> Separation:
     )
 
 
-__all__ = ["merge_harmonic_stems", "HARMONIC_STEMS", "MERGED_MODEL_SUFFIX"]
+def load_cached_separation(stems_dir, sample_rate: int = 44100) -> Optional[Separation]:
+    """Rebuild a Separation from stems already on disk (Input/<song>/stems/,
+    as written by tools/build_stem_cache.py using the SAME model+seed the
+    pipeline uses: htdemucs_6s, seed 0).
+
+    WHY: Demucs is the single largest model in a run and re-separating audio we
+    have already separated buys nothing. Loading the cache makes iteration
+    cheaper AND makes runs bit-identical in their separation, removing one
+    source of run-to-run variation when comparing notation changes.
+
+    Returns None when the directory is missing or holds no recognised stems, so
+    the caller can fall back to real separation rather than failing.
+    """
+    from pathlib import Path
+    import numpy as np
+    import soundfile as sf
+
+    directory = Path(stems_dir)
+    if not directory.is_dir():
+        return None
+
+    stems: Dict[StemType, AudioTrack] = {}
+    for stem in StemType:
+        path = directory / f"{getattr(stem, 'value', str(stem)).lower()}.wav"
+        if not path.exists():
+            continue
+        samples, sr = sf.read(str(path), dtype="float32", always_2d=True)
+        samples = np.ascontiguousarray(samples.T, dtype=np.float32)   # (channels, n)
+        stems[stem] = AudioTrack(
+            samples=samples, sample_rate=int(sr), num_channels=samples.shape[0],
+            duration_seconds=samples.shape[-1] / float(sr),
+            source_path=str(path),
+        )
+    if not stems:
+        return None
+    return Separation(
+        stems=stems, model_used="htdemucs_6s+cached",
+        confidence=1.0, separation_time_seconds=0.0,
+    )
+
+
+__all__ = ["merge_harmonic_stems", "load_cached_separation",
+           "HARMONIC_STEMS", "MERGED_MODEL_SUFFIX"]

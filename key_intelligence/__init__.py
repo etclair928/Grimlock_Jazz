@@ -12,7 +12,7 @@
 # =================================================================
 
 from key_intelligence.key_detector import (
-    KeyResult, detect_key, analyze_key, key_fit,
+    KeyResult, detect_key, analyze_key, analyze_key_from_notes, chroma_from_notes, key_fit,
     KEY_FIT_ANNOTATION_KIND, KEY_CONFIDENCE_THRESHOLD,
 )
 
@@ -20,6 +20,8 @@ __all__ = [
     "KeyResult",
     "detect_key",
     "analyze_key",
+    "analyze_key_from_notes",
+    "chroma_from_notes",
     "key_fit",
     "KEY_FIT_ANNOTATION_KIND",
     "KEY_CONFIDENCE_THRESHOLD",

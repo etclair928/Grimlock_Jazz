@@ -436,3 +436,130 @@ the over-detection that a side-by-side would expose; the format fork decides
 what "notation" even means for us. Everything here is analysis/measurement or
 output-side — none of it violates the standing rule that notation/export and
 review never reach back into transcription.
+
+---
+
+## 11. State of 6.0 after the engraving arc (2026-07-30 → 2026-08-07)
+
+*§7 described the layer layout as designed. This records what the system
+actually is now, and answers §10.4's standing goal — which asked for a Klangio
+head-to-head that is a measured result rather than an impression. We have it.*
+
+### 11.1 §10.4 ANSWERED — the Klangio head-to-head, measured
+
+The standing goal was *"it working and beating Klangio matters more than how it
+looks."* Run on four exports, two of them **our exact source recordings**:
+
+| axis | Grimlock Jazz | Klangio |
+|---|---|---|
+| notes vs stem-sum baseline | **1.00×** | 0.76× (drops ~24%) |
+| pitch-class agreement, same recording | — | **r = 0.975** (mutual) |
+| cross-version agreement (different performance) | — | **r = 0.948** |
+| duplicated output | **0%** | **19%** (Guitar≡Guitar, Bass≡Bass, byte-identical) |
+| invented instruments | **none** | Guitar/Violin/Wind/Synth on a piano-bass-trumpet-drums track |
+| rest/note (page) | 0.79 → **~0.41** | **0.06–0.10** |
+| percussion notation | pitched → **unpitched** | unpitched |
+
+**Verdict: we are the better transcriber; Klangio is the better engraver.** The
+detection layer is externally corroborated — twice, on identical audio and on an
+independent performance. Everything still open is downstream of the notes.
+
+The moat assumption in §10.4 holds and sharpens: Klangio's advantage is **layout
+policy**, not perception. Its failure mode is **confident invention** — which is
+precisely what our laws forbid, and why our restraint on instrument naming was
+correct rather than merely cautious.
+
+### 11.2 Layers added since §7 was written
+
+§7's `Output → Scribe Engraver` has grown into a full engraving layer, and two
+new layers exist:
+
+**Output (engraving)** — beyond `scribe_engraver` (MIDI):
+- `notation_score.py` — the `NotationScore` object (§XIII.6's "missing middle"),
+  plus `build_routed_score`: per-stem staff routing, grand staff only where
+  earned (keyboard/guitar timbre or the merged `other`), bass capped, drums their
+  own staff.
+- `piano_reduction.py` — hysteresis-Viterbi register split; the ≤4
+  rhythmic-independence voicer (now defaulting to 2); chord collapse; sustain
+  smoothing with an **acoustic gate**.
+- `musicxml_exporter.py` — MusicXML view; unpitched percussion; grid-aligned
+  chords; one system-level tempo mark.
+- `playability.py` — two-hand physical feasibility (a diagnostic, and the
+  objective term for reductions).
+- `readability.py` — **the second evaluation axis** §XIII.4 named and we had
+  never built. Six benchmarked page metrics.
+
+**University (`university/`)** — the pattern-study layer (GRIMLOCK_UNIVERSITY.md).
+Read-only by contract; three modes (`off` / `study` / `apply`); null-model
+falsification; melodic streaming purpose-built for pattern reach. OFF is
+byte-identical to the pipeline without it.
+
+**Check (`check/`)** — form + motif detection, now emitting section **instance
+identity** so the form timeline is recoverable from persisted annotations.
+
+### 11.3 Laws that held, and one that needed a boundary
+
+**Held, under real pressure:**
+- **The frozen note.** Every engraving transform is a *view*; nothing mutates a
+  `Note`. This is why playback stayed faithful through an entire page rebuild,
+  and why University APPLY is reversible by deleting annotations.
+- **Witnesses testify, one place decides.** The University publishes; only the
+  notation view acts, and only on unanimously-graduated detectors.
+- **Measure before building.** Four separate hypotheses were falsified by their
+  own metric before shipping (§XIX.4).
+
+**Needed a boundary (§XVI.8):** the frozen-note law governs the **detection
+floor**. It had leaked into *notation policy*, where "never drop, never invent,
+demand evidence" produces a cluttered page rather than a faithful one. The page
+is a **view** and is allowed editorial judgement the detection layer is not —
+provided the performance clock stays untouched. That distinction is now explicit.
+
+### 11.4 What the arc established about the remaining work
+
+1. **Detection is not the bottleneck** and should not be optimized further
+   without new evidence. It is at parity, externally corroborated.
+2. **The page gap is layout policy**, not musical understanding — voices per
+   staff, staff count, chord stacking, percussion conventions. Blunt structural
+   choices outperformed pattern recognition by an order of magnitude (§XIX.2).
+3. **We compute more evidence than we consume.** Five annotation streams are
+   written every run and read by nobody (§XVIII.2); three map directly onto
+   problems currently solved by hand-tuned thresholds.
+4. **Tuplet detection is root-caused** (§XVII.15): ReverseGeoCrypt measures
+   consecutive IOI *ratios* and is therefore structurally blind to an *evenly
+   played* tuplet (ratio 1.0 = binary's first ideal). It is a swing/uneven
+   witness, not a tuplet detector; `rhythm_inference`'s per-beat verdict is the
+   only real tuplet evidence.
+5. **Structure can inform meter.** Form-boundary alignment ranks 4/4 above 6/4
+   on Heavy Rotation Vibez and ranks our shipped reading *last* — weak evidence
+   (16 boundaries), but from a channel that survives syncopation, unlike accent
+   salience.
+
+### 11.5 Current leverage order (supersedes §10.3)
+
+1. Wire `acoustic_activity` into the legato gate — **built, needs calibration**
+   (fires on only 0.4% of gaps; AnechoicMa's resonance scale runs lower than the
+   gate assumes).
+2. Wire `range_plausibility` into stem routing — sub-C2 "vocals" are bass bleed;
+   MuseScore already draws these red for us.
+3. Strengthen `rhythm_inference`'s per-beat tuplet verdict (§XVII.15).
+4. More staves for harmonic content — the entire remaining rest gap; a
+   page-shape decision needing the user's eye.
+5. `key_fit` → enharmonic spelling — unblocked now that key detection is correct.
+6. Instrument naming by per-stem energy — the one place we could clearly surpass
+   Klangio, by naming only what we can defend.
+7. Injection–recovery harness — still unbuilt; the null model covers anything
+   detector-shaped far more cheaply.
+
+### 11.6 Development ergonomics (new)
+
+- **Cached-stem runs** — `transcribe_file(stem_cache_dir=...)` loads
+  `Input/<song>/stems/` and skips Demucs. Same model+seed, so results are
+  equivalent *and bit-identical between runs*, removing a source of variation
+  when A/B-ing notation. All nine test songs are cached.
+- **Intermediate pickles** — `save_intermediate_path` + `reexport_notation.py`:
+  notation iteration went from ~80 minutes to seconds. This is what made the
+  measured page work possible at all.
+- **Honest cost note:** the dominant run cost is now the **per-note acoustic
+  witnesses** (an FFT per note in `audit_note`, per-note window queries in
+  `note_support`/`anechoic`), not separation. Bypassing Demucs saves ~15–20%,
+  not the majority.

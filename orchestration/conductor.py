@@ -33,12 +33,13 @@ from core import Annotation, AnnotationStore, MusicBox, MusicalFindingsMap, Note
 from core import TempoMeter
 from separation_engine import separate
 from separation_engine import merge_harmonic_stems as _merge_harmonic_stems
+from separation_engine import load_cached_separation as _load_cached_separation
 from pitch_engine import (
     transcribe_basic_pitch, transcribe_basic_pitch_with_posteriorgram,
     transcribe_crepe_bass, BASIC_PITCH_SAMPLE_RATE, continuous_f0, make_f0_sampler,
 )
-from instrument_attribution import resolve_instrument_identity
-from key_intelligence import analyze_key, key_fit, KEY_FIT_ANNOTATION_KIND, KeyResult
+from instrument_attribution import resolve_instrument_identity, check_range, RANGE_ANNOTATION_KIND
+from key_intelligence import analyze_key, analyze_key_from_notes, key_fit, KEY_FIT_ANNOTATION_KIND, KeyResult
 from rhythm_engine import (
     run_librosa_tempo, run_madmom_tempo, run_note_onset_tempo_witness, run_lattice_witness,
     run_pulse_field, estimate_groove, compute_phase_deltas, detect_drums,
@@ -46,6 +47,7 @@ from rhythm_engine import (
     fft_meter_candidate, resolve_denominator, detect_onset_candidates,
     run_madmom_downbeat,
 )
+from core.musical_time import MusicalTime
 from epistemic import resolve_tempo, resolve_meter, arbitrate_tempo_octave, TempoResolution, MeterResolution
 from quantization import (
     build_lattice, infer_duration, QUANTIZATION_ANNOTATION_KIND,
@@ -64,6 +66,7 @@ from acoustic_witness import (
     evaluate_stem_support, NOTE_SUPPORT_ANNOTATION_KIND, NOTE_SUPPORT_SAMPLE_RATE, UNSUPPORTED,
 )
 from check import run_check
+from university import UniversityMode
 from output import engrave
 from model_registry import unload_demucs
 
@@ -78,7 +81,8 @@ from model_registry import unload_demucs
 DEFAULT_SEPARATION_MODEL = "htdemucs_6s"
 DURATION_ANNOTATION_KIND = "duration_hypothesis"
 
-_PITCHED_STEMS = (StemType.BASS, StemType.VOCALS, StemType.OTHER, StemType.GUITAR, StemType.PIANO)
+_PITCHED_STEMS = (StemType.BASS, StemType.VOCALS, StemType.OTHER, StemType.GUITAR,
+                  StemType.PIANO, StemType.BRASS)
 
 
 @dataclass
@@ -120,6 +124,11 @@ def transcribe_file(
         guided_tempo_bpm: Optional[float] = None,
         guided_time_signature: Optional[Tuple[int, int]] = None,
         guided_key: Optional[str] = None,
+        routed_layout: bool = True,
+        save_intermediate_path: Optional[Union[str, Path]] = None,
+        university_mode: Union[str, "UniversityMode"] = "off",
+        stem_cache_dir: Optional[Union[str, Path]] = None,
+        university_corpus_path: Optional[Union[str, Path]] = None,
 ) -> PipelineResult:
     start_time = time.time()
     audio_path = str(audio_path)
@@ -145,9 +154,31 @@ def transcribe_file(
     # robustness testing - many seeds, same audio - every archived run needs to
     # say which draw it was. A reproducible result that doesn't record what made
     # it reproducible is only accidentally reproducible.
-    separation: Separation = separate(
-        engine, master_track, model_name=separation_model, device=device, seed=separation_seed,
-    )
+    # Cached stems (opt-in): skip Demucs when this song has already been
+    # separated by tools/build_stem_cache.py with the SAME model and seed.
+    # Demucs is the largest model in a run, and re-separating audio we have
+    # already separated buys nothing - it also makes repeat runs bit-identical
+    # in their separation, removing a source of variation when comparing
+    # notation changes. Falls back to real separation if the cache is absent or
+    # unreadable, so this can never silently produce a different pipeline.
+    separation: Optional[Separation] = None
+    if stem_cache_dir is not None:
+        separation = _load_cached_separation(stem_cache_dir)
+        if separation is not None:
+            music_box.log_decision(
+                stage_name="separation_engine", decision_type="separation_cache_hit",
+                before_state={"cache_dir": str(stem_cache_dir)},
+                after_state={"stems": [s.value for s in separation.stems],
+                             "model": separation.model_used},
+                reasoning="Loaded pre-separated stems from the cache instead of running "
+                          "Demucs. Same model+seed as a live run, so the stems are "
+                          "identical; skips the largest model in the pipeline.",
+                reversible=False,
+            )
+    if separation is None:
+        separation = separate(
+            engine, master_track, model_name=separation_model, device=device, seed=separation_seed,
+        )
     music_box.log_decision(
         stage_name="separation_engine", decision_type="separated",
         before_state={},
@@ -316,6 +347,60 @@ def transcribe_file(
         } - {None})
         if families_found:
             findings.instrument_families[stem] = families_found
+
+    # Key, re-read from OUR OWN NOTES (§XVII.2). The audio path above reads
+    # chroma off the FULL MIX, where drums/percussion smear the pitch-class
+    # profile; the transcribed notes are 90-99% diatonic - a much cleaner
+    # signal we already compute. Two witnesses, one place decides: the
+    # notes-based reading wins when it is at least as confident, and both are
+    # logged. Guided key stays a hard lock (§2.7) and is never arbitrated.
+    if guided_key is None and pitched_notes:
+        notes_key = analyze_key_from_notes(pitched_notes)
+        audio_key = key_result
+        if notes_key.confidence >= audio_key.confidence and notes_key.key != audio_key.key:
+            key_result = notes_key
+            findings.key = notes_key.key
+            findings.key_confidence = notes_key.confidence
+        music_box.log_decision(
+            stage_name="key_intelligence", decision_type="key_from_notes",
+            before_state={"audio_key": audio_key.key,
+                          "audio_confidence": round(audio_key.confidence, 3)},
+            after_state={"notes_key": notes_key.key,
+                         "notes_confidence": round(notes_key.confidence, 3),
+                         "resolved": key_result.key},
+            reasoning="Key re-read from the transcribed notes rather than mix chroma "
+                      "(§XVII.2: mix chroma is smeared by percussion). The more "
+                      "confident witness wins; both are recorded.",
+            reversible=True,
+        )
+
+    # Pitch-range plausibility (§XVII.6): flag notes outside their own stem's
+    # physical range - a bass note above G4, a "vocal" below C2. Measured
+    # against Klangio on identical audio, which held a tight, realistic bass
+    # range while ours ran to midi 77. Annotation-only: nothing is dropped or
+    # re-pitched, the verdict simply exists for the engraver or a later
+    # reducer to consult.
+    range_verdicts = check_range(all_notes)
+    for rv in range_verdicts:
+        annotations.add(Annotation(
+            note_id=rv.note_id, kind=RANGE_ANNOTATION_KIND,
+            value={"verdict": rv.verdict, "reason": rv.reason,
+                   "stem": rv.stem, "pitch": rv.pitch},
+            source=Provenance.TIMBRE_INTELLIGENCE,
+        ))
+    if range_verdicts:
+        by_stem: Dict[str, int] = {}
+        for rv in range_verdicts:
+            by_stem[rv.stem] = by_stem.get(rv.stem, 0) + 1
+        music_box.log_decision(
+            stage_name="instrument_attribution", decision_type="range_plausibility",
+            before_state={"notes": len(all_notes)},
+            after_state={"implausible": len(range_verdicts), "by_stem": by_stem},
+            reasoning="Notes outside their own stem's physical pitch range - octave/"
+                      "overtone artifacts or cross-stem bleed. Verdict only; nothing "
+                      "is dropped.",
+            reversible=True,
+        )
 
     music_box.log_decision(
         stage_name="quantization", decision_type="sustain_recovery",
@@ -673,6 +758,15 @@ def transcribe_file(
         report = anechoic_reports.get(note.stem)
         if report is not None:
             state = report.query(note.start_ms, note.end_ms)
+            # TRAILING window - the gap immediately AFTER this note. This is the
+            # evidence the notation layer actually needs to decide whether a gap
+            # is a real rest or a cut-off artifact: if the stem is still ringing
+            # there, the note should be written out; if it is genuinely silent,
+            # the rest is real. Until now the legato fill was a blanket
+            # "close every gap under N beats" threshold chosen BY EAR
+            # (§XVII.14), while this witness was already measuring the answer
+            # and being written to an annotation nobody read (§XVIII.2).
+            trail = report.query(note.end_ms, note.end_ms + beat_ms)
             annotations.add(Annotation(
                 note_id=note.id, kind=ACOUSTIC_ACTIVITY_ANNOTATION_KIND,
                 value={
@@ -680,6 +774,11 @@ def transcribe_file(
                     "resonance_probability": state.resonance_probability,
                     "active_material_probability": state.active_material_probability,
                     "confidence_penalty": state.get_confidence_penalty(),
+                    # trailing-gap evidence for the notation layer
+                    "trailing_resonance": trail.resonance_probability,
+                    "trailing_void": trail.rhythmic_void_probability,
+                    "trailing_active": trail.active_material_probability,
+                    "trailing_region": trail.region_type,
                 },
                 source=Provenance.ANECHOIC_MA,
             ))
@@ -864,6 +963,23 @@ def transcribe_file(
     # ensemble at once (unlike TieReconstruction, which stays within one
     # voice) - flags measures that are low-confidence and/or fragmented.
     # Read-only reporting on MusicalFindingsMap; nothing acts on it.
+    # THE MAP between clock time and musical position (core/musical_time.py).
+    # Built ONCE from the tracked beats and handed to the notation view, so
+    # every clock<->musical conversion goes through one object instead of
+    # dividing by 60000/bpm in three separate places. Measured: converting
+    # only the quantizer moved Chopin recall +9.6% because the exporter's two
+    # conversions silently reverted it.
+    musical_time = MusicalTime.from_beats(
+        tempo_resolution.tempo_meter.beat_times_ms,
+        fallback_beat_ms=tempo_resolution.tempo_meter.beat_duration_ms)
+    music_box.log_decision(
+        stage_name="quantization", decision_type="musical_time",
+        before_state={"tempo_bpm": tempo_resolution.tempo_meter.tempo_bpm},
+        after_state={"tracked_beats": len(musical_time.beats_ms),
+                     "usable": bool(musical_time.usable),
+                     "summary_bpm": round(musical_time.summary_bpm(), 2)},
+        reasoning="beat-space map for notation timing", reversible=True)
+
     findings.trouble_measures = build_trouble_map(pitched_notes, tempo_resolution.tempo_meter)
     music_box.log_decision(
         stage_name="quantization", decision_type="trouble_map",
@@ -916,6 +1032,54 @@ def transcribe_file(
         reversible=True,
     )
 
+    # Grimlock University (GRIMLOCK_UNIVERSITY.md) - OFF by default.
+    # Runs AFTER consolidation on purpose: raw Basic Pitch output is ~52%
+    # same-pitch rearticulation and ~39% sub-16th fragments, so a pattern
+    # layer reading it upstream would be studying detector artifacts, not
+    # music. Read-only w.r.t. Notes in every mode; STUDY only annotates and
+    # logs (output byte-identical), APPLY additionally lets the NOTATION
+    # view honor what was found (the performance clock / MIDI is untouched
+    # either way, so playback fidelity is unaffected by construction).
+    uni_mode = UniversityMode.parse(university_mode)
+    university_report = None
+    if uni_mode.runs:
+        from university import (
+            apply_observations, study, write_corpus, write_study_annotations,
+        )
+        university_report = study(
+            all_notes, annotations,
+            tempo_bpm=tempo_resolution.tempo_meter.tempo_bpm,
+            mode=uni_mode, use_consolidation=True,
+        )
+        annotated = write_study_annotations(university_report, annotations)
+        applied = {}
+        if uni_mode.applies:
+            applied = apply_observations(
+                university_report, annotations, {n.id: n for n in all_notes})
+        if university_corpus_path is not None:
+            try:
+                write_corpus(university_report, str(university_corpus_path),
+                             song=Path(audio_path).stem)
+            except Exception:
+                pass
+        music_box.log_decision(
+            stage_name="grimlock_university", decision_type="pattern_study",
+            before_state={"mode": uni_mode.value,
+                          "notes_studied": university_report.notes_studied},
+            after_state={**university_report.summary(),
+                         "annotations_written": annotated, **applied},
+            reasoning=(
+                f"Grimlock University ran in {uni_mode.value} mode: "
+                f"{len(university_report.observations)} pattern observations covering "
+                f"{university_report.coverage:.1%} of studied notes. "
+                + ("APPLY: the notation view honors page-suppression and voice "
+                   "cohesion; Notes and MIDI are unchanged."
+                   if uni_mode.applies else
+                   "STUDY: evidence only - pipeline output is unchanged.")
+            ),
+            reversible=True,
+        )
+
     # beat_times_ms is the anchor witness's TRACKED beat grid - the plug
     # that used to be left disconnected: the Rhythm Engine computed real
     # beat positions and the engraver only ever received one scalar
@@ -940,25 +1104,79 @@ def transcribe_file(
     # readable than the over-fragmented per-line staves until voice
     # separation improves.
     if output_musicxml_path is not None:
-        from output.notation_score import build_notation_score
         from output.musicxml_exporter import export_musicxml
-        notation_score = build_notation_score(
-            all_notes, annotations,
-            tempo_bpm=tempo_resolution.tempo_meter.tempo_bpm,
-            time_signature=(meter_resolution.numerator, meter_resolution.denominator),
-            key=findings.key, use_voices=False, use_consolidation=True,
-            ratio_family=ratio_family,
-        )
+        if routed_layout:
+            # Per-stem staff routing (user directive 2026-07-31): each stem its
+            # own staff; a GRAND STAFF only where earned (guitar/piano/harp
+            # timbre or the merged 'other', or verifiably polyphonic); a
+            # melodic/vocal stem sorted into Voice 1/2/... before a grand staff;
+            # bass and drums each a single staff. Timbre (family annotation) +
+            # polyphony decide - via Timbre Intelligence and Voice Continuity.
+            from output.notation_score import build_routed_score
+            notation_score = build_routed_score(
+                all_notes, annotations,
+                tempo_bpm=tempo_resolution.tempo_meter.tempo_bpm,
+                time_signature=(meter_resolution.numerator, meter_resolution.denominator),
+                key=findings.key, use_consolidation=True, ratio_family=ratio_family,
+                honor_university=uni_mode.applies,
+                musical_time=musical_time,
+            )
+            layout_desc = ("per-stem routed (grand staff where earned)"
+                           + (" + university APPLY" if uni_mode.applies else ""))
+        else:
+            from output.notation_score import build_notation_score
+            notation_score = build_notation_score(
+                all_notes, annotations,
+                tempo_bpm=tempo_resolution.tempo_meter.tempo_bpm,
+                time_signature=(meter_resolution.numerator, meter_resolution.denominator),
+                key=findings.key, use_voices=False, use_consolidation=True,
+                ratio_family=ratio_family,
+            )
+            layout_desc = "one staff per family"
         export_musicxml(notation_score, str(output_musicxml_path))
         music_box.log_decision(
             stage_name="scribe_engraver", decision_type="musicxml_written",
             before_state={}, after_state={"output_path": str(output_musicxml_path),
                                           "parts": len(notation_score.parts),
-                                          "notes": notation_score.total_notes},
+                                          "notes": notation_score.total_notes,
+                                          "layout": layout_desc},
             reasoning=f"#3: serialized {notation_score.total_notes} notes across "
-                      f"{len(notation_score.parts)} parts to MusicXML (notation space, not MIDI).",
+                      f"{len(notation_score.parts)} parts to MusicXML ({layout_desc}).",
             reversible=False,
         )
+
+    # Save the expensive intermediate (frozen notes + all annotations + the
+    # resolved tempo/meter/key/ratio_family) so notation LAYOUT can be
+    # re-exported in seconds without re-running separation + Basic Pitch +
+    # the acoustic witnesses (the ~hour cost). Notation is a view over this;
+    # iterating on staff routing / voicing should never pay for detection again.
+    if save_intermediate_path is not None:
+        try:
+            import pickle
+            payload = {
+                "all_notes": all_notes,
+                "annotations": annotations,
+                "tempo_bpm": tempo_resolution.tempo_meter.tempo_bpm,
+                "time_signature": (meter_resolution.numerator, meter_resolution.denominator),
+                "key": findings.key,
+                "ratio_family": ratio_family,
+            }
+            with open(str(save_intermediate_path), "wb") as fh:
+                pickle.dump(payload, fh)
+            music_box.log_decision(
+                stage_name="conductor", decision_type="intermediate_saved",
+                before_state={}, after_state={"path": str(save_intermediate_path),
+                                              "notes": len(all_notes)},
+                reasoning="Saved notes+annotations+resolved params so notation can be "
+                          "re-exported without re-running the pipeline.",
+                reversible=False,
+            )
+        except Exception as e:
+            music_box.log_decision(
+                stage_name="conductor", decision_type="intermediate_save_failed",
+                before_state={}, after_state={"error": f"{type(e).__name__}: {e}"},
+                reasoning="Intermediate save failed (non-fatal).", reversible=False,
+            )
 
     elapsed = time.time() - start_time
     music_box.log_decision(
