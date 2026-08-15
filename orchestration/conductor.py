@@ -264,6 +264,7 @@ def transcribe_file(
     onset_refined_count = 0
     stem_tracks_by_type: Dict[StemType, AudioTrack] = {}
     anechoic_reports: Dict[StemType, AnechoicReport] = {}
+    stem_onsets_by_type: Dict[StemType, List[float]] = {}
     for stem in _PITCHED_STEMS:
         if not separation.has_stem(stem):
             continue
@@ -288,6 +289,16 @@ def transcribe_file(
         # detector) and bass (two witnesses, fast attack) land right. The
         # dual-witness machinery for this already existed in rhythm_engine
         # and was wired to nothing. Annotation-only; Note.start_ms stands.
+        # OWN-STEM ONSETS for the consolidation attack-gate (see
+        # note_consolidation._has_attack). Consulting the MASTER MIX's onsets
+        # regressed dense material badly - every drum hit voted on whether a
+        # held vocal note had been restruck, so the gate opened constantly and
+        # You Say God Says came back at 33.5% sub-32nd notes, the exact defect
+        # consolidation exists to prevent. A piano re-articulation has to be
+        # evidenced by a PIANO attack.
+        stem_onsets_by_type[stem] = sorted(
+            detect_onset_candidates(engine, stem_track).combined_ms)
+
         onset_refinements = refine_note_onsets(engine, stem_track, stem_notes)
         for ref in onset_refinements:
             annotations.add(Annotation(
@@ -1029,7 +1040,8 @@ def transcribe_file(
     # (for the phase-locked grid), so this costs nothing new.
     _attack_ms = sorted(onset_candidates.combined_ms) if onset_candidates else ()
     runs_merged, fragments_absorbed = consolidate_fragments(
-        pitched_notes, annotations, onsets_ms=_attack_ms)
+        pitched_notes, annotations, onsets_ms=_attack_ms,
+        onsets_by_stem=stem_onsets_by_type)
     music_box.log_decision(
         stage_name="quantization", decision_type="note_consolidation",
         before_state={"pitched_notes": len(pitched_notes)},

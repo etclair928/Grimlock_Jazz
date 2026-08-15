@@ -55,7 +55,7 @@ DEFAULT_MERGE_GAP_MS = 60.0
 ATTACK_WINDOW_MS = 50.0
 
 
-def _has_attack(boundary_ms: float, onsets_ms: Sequence[float]) -> bool:
+def _has_attack(boundary_ms: float, onsets_ms: Sequence[float]) -> bool:  # noqa: D401
     """Is there a detected attack at this boundary? This is the ONLY thing that
     separates a re-trigger from a re-articulation.
 
@@ -79,6 +79,7 @@ def consolidate_fragments(
         annotations: AnnotationStore,
         max_gap_ms: float = DEFAULT_MERGE_GAP_MS,
         onsets_ms: Optional[Sequence[float]] = None,
+        onsets_by_stem: Optional[Dict[object, Sequence[float]]] = None,
 ) -> Tuple[int, int]:
     """Finds runs of same-(stem, pitch) notes separated by <= max_gap_ms
     (overlaps included) and annotates them: the earliest note of each run
@@ -89,9 +90,22 @@ def consolidate_fragments(
     for note in notes:
         by_voice[(note.stem, note.pitch)].append(note)
 
+    # OWN-STEM ONSETS. The first version consulted the MASTER MIX's onsets, so
+    # on dense material every drum hit voted on whether a held vocal note had
+    # been restruck. MEASURED regression on You Say God Says: the old rule
+    # absorbed ~2,300 of 2,285 same-pitch fragment pairs (4,847 -> 2,547 notes);
+    # the mix-onset gate absorbed only 859 (17.8%), leaving 33.5% of the output
+    # at a 32nd note or shorter at 62 BPM - the exact "jittery, all 32nd and
+    # 64th notes" complaint the module was built to fix. Solo piano improved and
+    # band material regressed, because onset DENSITY differs by an order of
+    # magnitude between them. A piano re-articulation must be evidenced by a
+    # piano attack, not a snare.
     runs_merged = 0
     fragments_absorbed = 0
-    for group in by_voice.values():
+    for (stem, _pitch), group in by_voice.items():
+        stem_onsets = (onsets_by_stem or {}).get(stem)
+        if stem_onsets is None:
+            stem_onsets = onsets_ms or ()
         group.sort(key=lambda n: n.start_ms)
         i = 0
         while i < len(group):
@@ -106,7 +120,7 @@ def consolidate_fragments(
                    # Reflections in D, consolidation deleted 31% of notes and 43%
                    # of the 4+ note chords, taking mean chord size to 3.16 against
                    # the reference's 6.07.
-                   and not _has_attack(group[j].start_ms, onsets_ms or ())):
+                   and not _has_attack(group[j].start_ms, stem_onsets)):
                 run.append(group[j])
                 run_end = max(run_end, group[j].end_ms)
                 j += 1
