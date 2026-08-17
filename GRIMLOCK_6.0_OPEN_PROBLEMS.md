@@ -1963,3 +1963,105 @@ replicated - and it is one dimension, not a texture model. The honest name is
 - **The library-wide sweep** (`tools/voice_cap_sweep.py`). Deciding a layout
   default on 9 songs instead of the one that happened to be open is what made
   cap 2 defensible, and would have prevented the original cap-2 rejection.
+
+---
+
+## XXII. Why Klangio reads better - the four mechanisms, measured (2026-08-17)
+
+*Four songs of head-to-head plus three answer keys make this answerable rather
+than impressionistic. Klangio is NOT hearing better: on identical audio our
+pitch-class agreement runs r=0.957-0.992, and on Federal Blvd we sat at 1.00x
+the stem-sum baseline while it dropped 24%. It reads better for four specific
+reasons, in descending order of measured size.*
+
+### XXII.1 It tracks a tempo curve; we emit one number
+
+Klangio writes **8-15 tempo marks per song**. We write 1.
+
+This is the dominant cause. A grid that follows the performance puts each note
+ON a position with a clean duration that tiles the bar. A rigid grid puts notes
+BETWEEN positions, and the engraver fills the leftovers with rests and ties.
+
+MEASURED: 87-97% of beats sit >0.35s from an isochronous grid on the rubato
+pieces, drifting up to 7s. Even HRV - metronomic at beat-interval CV 0.030 -
+drifts 2.0s over four minutes and is >0.35s off for 91% of beats. So this is not
+a rubato-only concern.
+
+Half-addressed: MusicalTime now carries the curve and all three clock<->position
+conversions go through it (SS XXI). NOT addressed: we still EMIT one tempo mark,
+so the curve is invisible to a reader and to playback.
+
+### XXII.2 Its durations reach the next note; ours stop where the sound decays
+
+Basic Pitch ends a note where energy falls off. A NOTATED duration is not an
+acoustic fact - a quarter is a quarter whether played staccato or held under
+pedal. MEASURED: 139% duration distortion against the consolidated source, and
+it barely moves across voice caps, so it is not a layout artifact.
+
+Short durations leave gaps between consecutive notes; gaps become rests.
+
+### XXII.3 Its lattice can express what the music does; ours cannot
+
+`notation_quantizer._subdivisions_per_beat` returns 3 only for 6/8, 9/8 and
+12/8, and 4 for everything else. So OUTSIDE COMPOUND METER A TRIPLET IS
+STRUCTURALLY IMPOSSIBLE. The Ellington reference carries 135 tuplet events and
+31 transitions at 3:2 or 2:3; our barred output produces effectively none, while
+over-producing 1:1 (288 vs 193). Each rounded tuplet leaves a remainder that
+becomes a rest or a tie.
+
+The fix is a lattice that can express both families (12 = lcm(3,4)), NOT
+per-note tuplet guessing - that manufactured 3,210 tuplets against 4,971
+noteheads on an early pass, which is why the ratio_family gate exists.
+
+### XXII.4 Counter-intuitively, its HIGHER note count LOWERS its rest ratio
+
+Klangio emits 8,014 pitched noteheads to our 3,079 on Old Soul's Patience -
+same 283 seconds. Denser staves have less empty time to fill. More notes means
+FEWER rests.
+
+So "our page is cluttered because we detect too much" is backwards: we detect
+LESS and write MORE rests. This is SS XX.7 confirmed on a fourth song.
+
+### XXII.5 What it pays for this
+
+Klangio commits, and the commitments cost it - consistently, across every song
+we have compared:
+
+| song | duplicated verbatim | invented parts | overfull measures |
+|---|---|---|---|
+| Federal Blvd | 20.1% | Guitar x2, Bass x2, Violin, Wind | 12 |
+| End Transmission | 15.3% | Guitar x2, Bass x2, Violin, Wind | 1 |
+| Heavy Rotation Vibez | 19% | Guitar, Violin, Wind, Synth | - |
+| Old Soul's Patience | (Piano x2, Guitar x2, Bass x2) | Violin, Wind | 1 |
+
+SS XIX said it precisely: *"produce the score a copyist would write" is the
+right objective, but a copyist compresses from KNOWLEDGE of what the music is.
+Simulate that confidence without the knowledge and the failure mode is not a
+worse page - it is a beautiful page that lies.*
+
+### XXII.6 A second confirmation of the bar-doubling bug
+
+Old Soul's Patience: Klangio reads 3/4, we read **6/4 at 54.0 BPM**. That is the
+same doubling HRV's answer key proved (107 BPM 3/4 against our 107.0 BPM 6/4,
+the pulse correct to 0.2%). Two independent songs, same signature - and if 54 in
+6/4 is really 108 in 3/4, the bar LENGTH is identical and only the label is
+wrong. Cheap to carry, expensive to "fix" by flattening the tempo curve.
+
+### XXII.7 Baseline discipline held
+
+Jazz beat naked Basic Pitch on the same audio - recall 0.153 vs 0.127, F1 0.220
+vs 0.201 (naked wins precision, as it should with 2,125 notes against our
+3,079). The pipeline is adding, not subtracting.
+
+### XXII.8 Next work, sized
+
+1. **Emit the tempo curve** as tempo marks. We already compute it; a reader and
+   a playback engine currently cannot see it. Purely additive.
+2. **Durations to the next event**, in beat space. Attacks the 139%.
+3. **Subdivision 12** where the evidence supports it, gated on ratio_family so
+   per-note tuplet guessing cannot return.
+4. **The meter vote** - now with TWO answer-key confirmations of bar doubling.
+   Worth ~51 points of recall on band material (HRV: 93.3% detected, 42.2%
+   delivered).
+5. **Piano detection** - the ceiling, and the only item outside the notation
+   layer (Chopin 69.1%, Ellington 62.1% recoverable from raw detection).

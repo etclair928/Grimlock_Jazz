@@ -56,7 +56,15 @@ def load_answer_key(path: str) -> Tuple[List[Note], float]:
     for el in s.flatten().notes:
         off = float(el.offset)
         dur = float(el.quarterLength)
-        for p in (el.pitches if el.isChord else [el.pitch]):
+        # Skip <unpitched> percussion. Drum noteheads carry a staff POSITION,
+        # not a pitch, so el.pitch raises on them - and comparing them to our
+        # pitched output would be meaningless anyway (we exclude drums on our
+        # side too). Klangio notates its drum staff this way, correctly.
+        try:
+            pitches = el.pitches if el.isChord else [el.pitch]
+        except AttributeError:
+            continue
+        for p in pitches:
             out.append((off, off + dur, int(p.midi)))
     out.sort()
     return out, (max(e for _s, e, _p in out) if out else 0.0)
