@@ -35,4 +35,9 @@ Input/
 grimlock_5.4.txt
 grimlock_symphony5_5.txt
 grimlock_refactor_context.md
-code2prompt_jazz.md
+# Match by PATTERN, not by literal filename: the rule below used to name
+# code2prompt_jazz.md alone, so every later dump (jazz_code2prompt.md,
+# jazz_code2prompt2.md, jazz_code2prompt2_src.md - 2.7MB between them) slipped
+# through and sat untracked forever, one careless `git add -A` away from
+# landing in history. tools/code2prompt.py regenerates all of them on demand.
+*code2prompt*.md
