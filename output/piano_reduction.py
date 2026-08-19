@@ -56,11 +56,12 @@ SPLIT_SWITCH_PENALTY = 0.4
 
 # Two notes whose onsets AND ends both fall within these windows share a
 # rhythm -> one chord in one voice. Divergent rhythm -> separate voices.
+# Read ONLY by _chord_events' raw-millisecond fallback, which runs when no
+# tempo is available; the grid-aligned path production takes ignores them.
+# (The header used to call them dead outright - true of the grid path, not of
+# the function.)
 CHORD_ONSET_TOL_MS = 40.0
 CHORD_OFFSET_TOL_MS = 90.0
-# NB the two constants above are DEAD - _chord_events was rewritten to
-# grid-aligned grouping and no longer reads them. Kept only because removing
-# them would silently change nothing while looking like it changed something.
 
 # How close two RAW onsets must be to count as one chord, as a fraction of a
 # grid cell, before anything is snapped. Half a cell is the distance at which
@@ -386,11 +387,12 @@ def _chord_events(notes: List[NotationNote], ms_per_beat: float = 0.0,
         slots.sort(key=lambda s: s.start)
         return slots
 
+    # RAW-MILLISECOND FALLBACK, used only when no tempo is available (see the
+    # grid path above, which is what production takes). CHORD_ONSET_TOL_MS and
+    # CHORD_OFFSET_TOL_MS are live here - the module header used to call them
+    # dead, which was true of the grid path only.
     slots: List[_Slot] = []
-    index: Dict[Tuple[float, float], _Slot] = {}
     for note in sorted(notes, key=lambda n: (n.start_ms, n.pitch)):
-        if False:
-            pass
         placed = False
         for slot in reversed(slots):
             if note.start_ms - slot.start > CHORD_ONSET_TOL_MS:
@@ -408,7 +410,8 @@ def _chord_events(notes: List[NotationNote], ms_per_beat: float = 0.0,
 
 def _smooth_slots(slots: List[_Slot], ms_per_beat: float,
                   merge_gap_beats: float = 0.5, fill_max_beats: float = 1.0,
-                  beats_per_bar: int = 0, boundary_reach_beats: float = 2.0) -> List[_Slot]:
+                  beats_per_bar: int = 0, boundary_reach_beats: float = 2.0,
+                  bar_origin_ms: float = 0.0) -> List[_Slot]:
     """Fix the horizontal choppiness within one voice (§16 follow-up: the
     grand staff read well but PLAYED choppy - measured 59% of adjacent notes
     separated by a rest, 52% same-pitch rearticulations, 39% <=16th-note
@@ -490,6 +493,10 @@ def _smooth_slots(slots: List[_Slot], ms_per_beat: float,
     # with a trailing rest. Bounded deliberately - it NEVER crosses a barline
     # (that would change the harmonic rhythm) and it only extends to the FIRST
     # boundary reached, so a genuine multi-beat rest survives as a rest.
+    # Bar boundaries are measured from the RESOLVED DOWNBEAT, not from absolute
+    # zero (2026-08-17 audit). Measuring from zero meant this rule's "never
+    # cross a barline" guard was enforced against barlines nobody draws - the
+    # page's bars start at the downbeat, and the two only coincide by accident.
     if beats_per_bar > 0:
         bar_ms = beats_per_bar * ms_per_beat
         for i, slot in enumerate(merged):
@@ -497,19 +504,21 @@ def _smooth_slots(slots: List[_Slot], ms_per_beat: float,
             silence_to = min(next_start, slot.end + boundary_reach_beats * ms_per_beat)
             if silence_to <= slot.end:
                 continue
-            bar_index = int(slot.end // bar_ms)
+            rel_end = slot.end - bar_origin_ms
+            bar_index = math.floor(rel_end / bar_ms)
             # candidate boundaries inside THIS bar, nearest first
             for div in (1.0, 0.5):                        # beat, then half-bar
                 step = div * ms_per_beat if div == 1.0 else bar_ms / 2.0
                 if step <= 0:
                     continue
-                boundary = (int(slot.end // step) + 1) * step
-                if boundary > silence_to:
+                boundary = (math.floor(rel_end / step) + 1) * step
+                if boundary + bar_origin_ms > silence_to:
                     continue
-                if int(boundary // bar_ms) != bar_index and abs(boundary % bar_ms) > 1e-6:
+                if (math.floor(boundary / bar_ms) != bar_index
+                        and abs(boundary % bar_ms) > 1e-6):
                     continue                              # never cross a barline
-                if boundary > slot.end:
-                    slot.end = boundary
+                if boundary + bar_origin_ms > slot.end:
+                    slot.end = boundary + bar_origin_ms
                     break
     return merged
 
@@ -517,7 +526,8 @@ def _smooth_slots(slots: List[_Slot], ms_per_beat: float,
 def assign_voices(notes: List[NotationNote], max_voices: int = 4,
                   smooth: bool = False, ms_per_beat: float = 500.0,
                   merge_gap_beats: float = 0.5, fill_max_beats: float = 1.0,
-                  beats_per_bar: int = 0, boundary_reach_beats: float = 2.0) -> List[NotationNote]:
+                  beats_per_bar: int = 0, boundary_reach_beats: float = 2.0,
+                  bar_origin_ms: Optional[float] = None) -> List[NotationNote]:
     """Stamp voice_index (1..max_voices) on a single staff's notes.
 
     Interval-partition the chord-events across at most `max_voices` voices
@@ -534,7 +544,10 @@ def assign_voices(notes: List[NotationNote], max_voices: int = 4,
     if not slots:
         return notes
 
-    voices: List[Optional[_Slot]] = []                # active slot per voice
+    # Entries are always real slots - a voice is created BY being given one, so
+    # there is no "empty voice" state to represent (the old Optional[...] and
+    # the `act is None` test in free_voices below were never reachable).
+    voices: List[_Slot] = []                          # active slot per voice
     voice_slots: List[List[_Slot]] = []               # committed slots per voice
     # Grimlock University APPLY: gesture id -> the voice it already owns, so a
     # scale run / arpeggio / sequence stays in ONE voice rather than being
@@ -546,7 +559,7 @@ def assign_voices(notes: List[NotationNote], max_voices: int = 4,
 
     def free_voices(start: float) -> List[int]:
         return [i for i, act in enumerate(voices)
-                if act is None or act.end <= start + overlap_tol]
+                if act.end <= start + overlap_tol]
 
     def anchor(i: int) -> Optional[float]:
         """This voice's recent REGISTER, not just its last note. Averaged over a
@@ -612,7 +625,8 @@ def assign_voices(notes: List[NotationNote], max_voices: int = 4,
     if smooth:
         voice_slots = [_smooth_slots(vs, ms_per_beat, merge_gap_beats, fill_max_beats,
                                      beats_per_bar=beats_per_bar,
-                                     boundary_reach_beats=boundary_reach_beats)
+                                     boundary_reach_beats=boundary_reach_beats,
+                                     bar_origin_ms=bar_origin_ms or 0.0)
                        for vs in voice_slots]
 
     # RELABEL SO VOICE 1 CARRIES THE TUNE. Voice numbers are not arbitrary:
@@ -628,23 +642,70 @@ def assign_voices(notes: List[NotationNote], max_voices: int = 4,
     # onset, which is what a reader actually follows.
     order = list(range(len(voice_slots)))
     if len(voice_slots) > 1 and RELABEL_ENABLED:
-        boundaries = sorted({s.start for vs in voice_slots for s in vs})
+        # Rank on the slot's HIGHEST note, not its pitch_center (a mean).
+        # A four-note chord averaging 60 can top out at 75 and outrank a
+        # single-line melody at 70 - which is how ranking by the mean made
+        # voice1_is_top WORSE (0.475 -> 0.436) instead of better. A reader
+        # follows the top NOTE, so that is what has to be ranked.
+        #
+        # SWEEP LINE, not a scan per boundary (2026-08-17 audit). This was
+        # "for every distinct onset, look at every slot of every voice" -
+        # O(onsets x slots) with a max() inside, i.e. quadratic in note count
+        # per staff, on a page that can carry thousands. Walking slot
+        # start/end events in time order gives the same answer in O(n log n).
+        # (time, kind, voice, top_pitch). kind -1 = a slot ends, +1 = one starts;
+        # ends are applied before starts at the same instant, matching the
+        # original's half-open `s.start <= t < s.end` test.
+        events: List[Tuple[float, int, int, int]] = []
+        onsets: set = set()
+        for i, vs in enumerate(voice_slots):
+            for s in vs:
+                onsets.add(s.start)
+                if s.end <= s.start:
+                    # A zero-length slot never sounds (the test is half-open),
+                    # but its start is still an instant to score - some OTHER
+                    # voice may be sounding there. Carry it as a no-op marker
+                    # so the sweep stops at it; without one the sweep only
+                    # visits instants that have a real event and silently drops
+                    # those boundaries.
+                    events.append((s.start, 0, i, 0))
+                    continue
+                top = max(n.pitch for n in s.notes)
+                events.append((s.start, 1, i, top))
+                events.append((s.end, -1, i, top))
+        # ends (-1) before markers (0) before starts (+1) at the same instant,
+        # which reproduces the half-open `s.start <= t < s.end` test exactly.
+        events.sort(key=lambda e: (e[0], e[1]))
+
         top_share = [0] * len(voice_slots)
-        for t in boundaries:
-            # Rank on the slot's HIGHEST note, not its pitch_center (a mean).
-            # A four-note chord averaging 60 can top out at 75 and outrank a
-            # single-line melody at 70 - which is how ranking by the mean made
-            # voice1_is_top WORSE (0.475 -> 0.436) instead of better. A reader
-            # follows the top NOTE, so that is what has to be ranked.
-            best_i, best_p = None, float("-inf")
-            for i, vs in enumerate(voice_slots):
-                for s in vs:
-                    if s.start <= t < s.end:
-                        top = max(n.pitch for n in s.notes)
-                        if top > best_p:
-                            best_i, best_p = i, top
-            if best_i is not None:
-                top_share[best_i] += 1
+        # voice -> the top pitches of every slot of that voice sounding right
+        # now. A LIST, not a single value: _smooth_slots can leave two slots of
+        # one voice overlapping, and collapsing them to one entry would retire
+        # the whole voice when only one of its slots ended.
+        sounding: Dict[int, List[int]] = defaultdict(list)
+        idx = 0
+        while idx < len(events):
+            now = events[idx][0]
+            while idx < len(events) and events[idx][0] == now:
+                _t, kind, voice, top = events[idx]
+                if kind > 0:
+                    sounding[voice].append(top)
+                elif kind < 0 and top in sounding[voice]:
+                    sounding[voice].remove(top)
+                idx += 1
+            # Score this instant only if a slot actually starts at it - the
+            # same set of instants the old per-boundary scan scored.
+            if now in onsets:
+                # Ties go to the LOWEST voice index, which is what the old
+                # scan did by construction (it walked voices in order and only
+                # replaced its best on a strictly higher pitch).
+                best_voice, best_top = None, float("-inf")
+                for voice in range(len(voice_slots)):
+                    tops = sounding.get(voice)
+                    if tops and max(tops) > best_top:
+                        best_voice, best_top = voice, max(tops)
+                if best_voice is not None:
+                    top_share[best_voice] += 1
         order.sort(key=lambda i: -top_share[i])
     relabel = {orig: new for new, orig in enumerate(order)}
 
@@ -688,6 +749,7 @@ def build_grand_staff(
         fill_max_beats: float = 1.0,
         family: str = "piano",
         beats_per_bar: int = 0,
+        bar_origin_ms: Optional[float] = None,
 ) -> NotationScore:
     """Assemble a two-part (treble/bass) grand-staff NotationScore with <=
     max_voices per staff already assigned. Each part is one braced-staff
@@ -697,10 +759,12 @@ def build_grand_staff(
     baseline (§17), the two halves behave differently, so they are split:
       - same-pitch MERGE (always) - removes machine-gun rearticulation and
         moves note count CLOSER to Basic Pitch (n/BP 1.66 -> 1.35): pure win.
-      - legato GAP-FILL (`fill_max_beats`, default 0 = OFF) - closes rests but
-        INVENTS sustain beyond what BP heard (sndT/BP 1.57 -> 1.69 -> 1.95 as
-        fill grows). Off by default to stay faithful to baseline; raise it
-        (e.g. 0.5) to trade fidelity for a smoother, less choppy line."""
+      - legato GAP-FILL (`fill_max_beats`) - closes rests but INVENTS sustain
+        beyond what BP heard (sndT/BP 1.57 -> 1.69 -> 1.95 as fill grows).
+        Defaults to 1.0 (a full beat), user-chosen by ear 2026-08-06; set 0.0
+        to disable it and keep only the same-pitch merge. The docstring used to
+        claim the default was 0/OFF, which stopped being true when the measured
+        value landed and was never updated."""
     ms_per_beat = 60000.0 / max(tempo_bpm, 1.0)
     hands = assign_hands(notes, tempo_bpm, switch_penalty=switch_penalty)
     parts: List[NotationPart] = []
@@ -711,7 +775,7 @@ def build_grand_staff(
         voiced = assign_voices(hand_notes, max_voices=max_voices,
                                smooth=smooth, ms_per_beat=ms_per_beat,
                                merge_gap_beats=merge_gap_beats, fill_max_beats=fill_max_beats,
-                               beats_per_bar=beats_per_bar)
+                               beats_per_bar=beats_per_bar, bar_origin_ms=bar_origin_ms)
         voiced.sort(key=lambda n: (n.start_ms, n.pitch))
         parts.append(NotationPart(
             family=family, voice_id=label, stem=StemType.OTHER,

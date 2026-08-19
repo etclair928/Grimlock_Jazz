@@ -7,6 +7,14 @@
 # RNNOnsetProcessor (a real, pretrained onset-specific model,
 # independent of the DBN beat tracker already used for tempo).
 #
+# AUDIO ENGINE BOUNDARY, ONE DELIBERATE EXCEPTION: this module writes a temp
+# WAV via soundfile. madmom's RNNOnsetProcessor loads from a PATH, not an
+# array, so there is no way to hand it the engine's view directly. The AUDIO
+# still comes from engine.view() - only the handoff is a file. Stated here
+# rather than left to silently contradict the Audio Engine header.
+# (pitch_engine/basic_pitch_engine.py has the same exception for the same
+# reason - basic_pitch.predict() also takes a path.)
+#
 # ONE place computes onset candidates; every other module in
 # rhythm_engine/ and quantization/ (tempo witnesses, meter detection,
 # groove, the lattice quantizer) asks this instead of each running its

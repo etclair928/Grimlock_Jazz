@@ -24,6 +24,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, Optional, Tuple
@@ -57,14 +58,29 @@ class TemporalLattice:
     preserve_ghost_notes: bool = True
     mode: QuantizationMode = QuantizationMode.GROOVE_AWARE
 
+    # WHERE THE GRID STARTS (2026-08-17 audit). Without this the lattice's
+    # grid lines were `k * period_ms` measured from ABSOLUTE ZERO - a grid with
+    # a tempo and no phase. Music does not begin when the file does: on a track
+    # whose first tracked beat is at 300ms, every grid line sat 300ms away from
+    # every real beat, so a note landing exactly ON a beat was "snapped" AWAY
+    # from it. The pipeline already solves phase twice elsewhere
+    # (build_phase_locked_grid, MusicalTime) and neither reached here.
+    origin_ms: float = 0.0
+    # The tracked-beat map, when the caller has one. Present: grid lines are
+    # subdivisions of the beats that were actually PLAYED, so the grid follows
+    # rubato. Absent: an isochronous grid from origin_ms at period_ms, which is
+    # the old behaviour with the phase bug removed.
+    musical_time: Optional[object] = None
+
     normalized_phase_ms: float = field(init=False, default=0.0)
-    _beat_cache: Dict[int, float] = field(init=False, default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
         if self.subdivisions_per_beat not in (2, 3, 4, 6):
             self.subdivisions_per_beat = 4
         self.period_ms = max(20.0, min(500.0, self.period_ms))
         self.swing_ratio = max(0.5, min(0.85, self.swing_ratio))
+        if self.musical_time is not None and not getattr(self.musical_time, "usable", False):
+            self.musical_time = None
 
         beat_duration_ms = self.period_ms * self.subdivisions_per_beat
         if beat_duration_ms > 0:
@@ -73,16 +89,29 @@ class TemporalLattice:
         else:
             self.normalized_phase_ms = 0.0
 
-        for i in range(-256, 257):
-            self._beat_cache[i] = i * self.period_ms
-
     def get_beat_time(self, beat_index: int) -> float:
-        return self._beat_cache.get(beat_index, beat_index * self.period_ms)
+        """Clock time of grid line `beat_index` (index 0 == the grid origin).
+        Indices are SUBDIVISIONS, not beats - see subdivisions_per_beat."""
+        if self.musical_time is not None:
+            return float(self.musical_time.to_ms(beat_index / self.subdivisions_per_beat))
+        return self.origin_ms + beat_index * self.period_ms
 
     def get_nearest_beat_index(self, time_ms: float) -> int:
+        if self.musical_time is not None:
+            return int(round(self.musical_time.to_beats(time_ms) * self.subdivisions_per_beat))
         if self.period_ms <= 0:
             return 0
-        return int(round(time_ms / self.period_ms))
+        return int(round((time_ms - self.origin_ms) / self.period_ms))
+
+    def _beat_phase(self, time_ms: float) -> float:
+        """Position within the beat this time falls in, in [0, 1)."""
+        if self.musical_time is not None:
+            pos = self.musical_time.to_beats(time_ms)
+            return pos - math.floor(pos)
+        beat_duration_ms = self.period_ms * self.subdivisions_per_beat
+        if beat_duration_ms <= 0:
+            return 0.0
+        return ((time_ms - self.origin_ms) % beat_duration_ms) / beat_duration_ms
 
     def _is_offbeat_eighth(self, time_ms: float) -> bool:
         """Is this note landing on the off-beat eighth (the "and" of
@@ -92,12 +121,9 @@ class TemporalLattice:
         additionally swing-push."""
         if self.subdivisions_per_beat != 4:
             return False
-        beat_duration_ms = self.period_ms * self.subdivisions_per_beat
-        if beat_duration_ms <= 0:
-            return False
-        beat_position = time_ms % beat_duration_ms
-        half_beat = beat_duration_ms / 2.0
-        return abs(beat_position - half_beat) < self.period_ms / 2.0
+        # Measured from the grid ORIGIN, not from absolute zero - otherwise
+        # "the and of the beat" means the and of a beat nobody played.
+        return abs(self._beat_phase(time_ms) - 0.5) < 0.5 / self.subdivisions_per_beat
 
     def _pocket_width_ms(self) -> float:
         """Normalized phase widens the pocket (musical expression) but
@@ -164,12 +190,19 @@ def build_lattice(
         groove_confidence: float = 0.0,
         lattice_confidence: float = 0.0,
         phase_delta_ms: float = 0.0,
+        musical_time: Optional[object] = None,
 ) -> TemporalLattice:
     """Factory deriving a TemporalLattice from a resolved TempoMeter +
     groove/lattice readings. `quantize_strength`/`microtiming_window_ms`
     are derived from the blended confidence (lower confidence -> gentler
     snapping, wider tolerance) rather than hardcoded - "when uncertain,
-    disturb the audio less"."""
+    disturb the audio less".
+
+    The grid's PHASE comes from the TempoMeter's own tracked beats - the
+    argument was always carrying them and this factory used only its scalar
+    tempo, which put every grid line a fixed offset away from every real beat
+    (2026-08-17 audit). Pass `musical_time` to additionally follow rubato
+    rather than assume the beats are evenly spaced."""
     subdivisions_per_beat = 3 if (tempo_meter.time_signature_denominator == 8
                                    and tempo_meter.time_signature_numerator in (6, 9, 12)) else 4
     period_ms = tempo_meter.beat_duration_ms / subdivisions_per_beat if tempo_meter.tempo_bpm > 0 else 125.0
@@ -178,6 +211,8 @@ def build_lattice(
     quantize_strength = float(np.clip(0.15 + 0.35 * blended, 0.15, 0.5))
     microtiming_window_ms = float(np.clip(25.0 - 15.0 * blended, 10.0, 25.0))
 
+    origin_ms = tempo_meter.beat_times_ms[0] if tempo_meter.beat_times_ms else 0.0
+
     return TemporalLattice(
         period_ms=period_ms,
         subdivisions_per_beat=subdivisions_per_beat,
@@ -185,6 +220,8 @@ def build_lattice(
         phase_delta_ms=phase_delta_ms,
         microtiming_window_ms=microtiming_window_ms,
         quantize_strength=quantize_strength,
+        origin_ms=origin_ms,
+        musical_time=musical_time,
     )
 
 

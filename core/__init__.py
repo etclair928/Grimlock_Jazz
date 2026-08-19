@@ -23,6 +23,7 @@ from core.source_types import Provenance
 from core.note_types import Note
 from core.annotation_types import Annotation, AnnotationStore
 from core.tempo_types import TempoMeter
+from core.musical_time import MusicalTime
 from core.separation_types import Separation
 from core.music_box import MusicBox, ForensicRecord
 from core.musical_findings_map import MusicalFindingsMap
@@ -36,6 +37,7 @@ __all__ = [
     "Annotation",
     "AnnotationStore",
     "TempoMeter",
+    "MusicalTime",
     "Separation",
     "MusicBox",
     "ForensicRecord",

@@ -55,6 +55,14 @@ class NotationNote:
     velocity: int
     source_note_id: str       # provenance back to the frozen Note
     is_tuplet: bool = False   # rhythm_inference's beat-level triplet verdict (not re-guessed)
+    # HOW MANY equal parts the beat was read as, when it is a tuplet. The
+    # bool above says "not binary"; only this says "into how many", and the
+    # page needs the number - a sextuplet's unit is 1/6 of a beat and a
+    # quintuplet's is 1/5, which are different noteheads. Written by
+    # rhythm_inference since 2026-08-17 and not READ until 2026-08-18,
+    # which is why every non-triplet tuplet was silently flattened to the
+    # nearest binary value on export.
+    tuplet_divisor: Optional[int] = None
     tie_start: bool = False   # tie_reconstruction: this note is held into the next same-pitch note
     tie_stop: bool = False    # ...and/or continues a tie from the previous one
     # Explicit engraving voice (1-based) when an upstream voicer has already
@@ -115,6 +123,13 @@ class NotationScore:
     # belongs to. Absent, the old constant-rate behaviour is preserved exactly.
     # `tempo_bpm` above is then a DISPLAY statistic, not the currency.
     musical_time: Optional[object] = None
+    # WHERE BAR 1 STARTS, in performance ms - the resolved downbeat, not a
+    # guess. None means "nobody knows", and consumers fall back to the earliest
+    # note in the score (the old behaviour). Before this existed the exporter
+    # anchored bars to the earliest note and piano_reduction anchored them to
+    # absolute zero, so the two disagreed about where every barline was
+    # (2026-08-17 audit).
+    bar_origin_ms: Optional[float] = None
 
     @property
     def total_notes(self) -> int:
@@ -153,6 +168,27 @@ def _page_timing(note: Note, annotations: AnnotationStore, use_notation_timing: 
     return start_ms, end_ms
 
 
+def _consolidated_end_ms(consolidation: dict, end_ms: float,
+                         annotations: AnnotationStore,
+                         use_notation_timing: bool) -> float:
+    """End of a consolidated run on the timeline THIS PAGE is drawing.
+
+    The consolidation annotation stores the run's end as a raw performance
+    millisecond, since that is the only timeline that exists when it runs.
+    Pasting that onto a notation-snapped start gave every merged run's primary
+    a duration off the notation grid - the un-notatable leftovers the exporter
+    then has to round away (2026-08-17 audit). The run's last fragment already
+    carries its own end on every timeline, so ask it."""
+    raw_end = consolidation.get("end_ms", end_ms)
+    if use_notation_timing:
+        last_id = consolidation.get("last_note_id")
+        if last_id:
+            value = annotations.latest_value(last_id, NOTATION_TIMING_ANNOTATION_KIND)
+            if value and value.get("end_ms") is not None:
+                return max(end_ms, float(value["end_ms"]))
+    return max(end_ms, raw_end)
+
+
 def build_notation_score(
         notes: List[Note],
         annotations: AnnotationStore,
@@ -164,6 +200,7 @@ def build_notation_score(
         use_notation_timing: bool = True,
         ratio_family: Optional[str] = None,
         musical_time=None,
+        bar_origin_ms: Optional[float] = None,
 ) -> NotationScore:
     """Groups notes into parts and resolves each note's page timing.
 
@@ -210,14 +247,17 @@ def build_notation_score(
         key_tuple = (family, voice_id, note.stem)
         start_ms, end_ms = _page_timing(note, annotations, use_notation_timing=use_notation_timing)
         if consolidation is not None and consolidation.get("role") == "primary":
-            end_ms = max(end_ms, consolidation.get("end_ms", end_ms))
+            end_ms = _consolidated_end_ms(consolidation, end_ms, annotations,
+                                          use_notation_timing)
         # The beat-level tuplet verdict, carried from rhythm_inference - never
         # re-derived from the rounded duration on the page.
         nt = annotations.latest_value(note.id, NOTATION_TIMING_ANNOTATION_KIND) if use_notation_timing else None
         is_tuplet = bool(nt.get("is_tuplet", False)) if nt else False
+        tuplet_divisor = nt.get("tuplet_divisor") if nt else None
         buckets[key_tuple].append(NotationNote(
             pitch=note.pitch, start_ms=start_ms, end_ms=end_ms,
             velocity=note.velocity, source_note_id=note.id, is_tuplet=is_tuplet,
+            tuplet_divisor=tuplet_divisor,
         ))
         drum_flag[key_tuple] = is_drum
 
@@ -254,7 +294,7 @@ def build_notation_score(
     return NotationScore(
         parts=parts, tempo_bpm=tempo_bpm,
         time_signature=time_signature, key=key, ratio_family=ratio_family,
-        musical_time=musical_time,
+        musical_time=musical_time, bar_origin_ms=bar_origin_ms,
     )
 
 
@@ -323,6 +363,7 @@ def build_routed_score(
         honor_university: bool = False,
         fill_max_beats: float = 1.0,
         musical_time=None,
+        bar_origin_ms: Optional[float] = None,
 ) -> NotationScore:
     """Route each STEM to the staff layout it warrants (see header):
       drums/bass          -> one single staff each
@@ -372,15 +413,18 @@ def build_routed_score(
             family = _DRUM_FAMILY if is_drum else "unknown"
         start_ms, end_ms = _page_timing(note, annotations, use_notation_timing=use_notation_timing)
         if consolidation is not None and consolidation.get("role") == "primary":
-            end_ms = max(end_ms, consolidation.get("end_ms", end_ms))
+            end_ms = _consolidated_end_ms(consolidation, end_ms, annotations,
+                                          use_notation_timing)
         if note.id in uni_extend:
             end_ms = max(end_ms, uni_extend[note.id])
         nt = annotations.latest_value(note.id, NOTATION_TIMING_ANNOTATION_KIND) if use_notation_timing else None
         is_tuplet = bool(nt.get("is_tuplet", False)) if nt else False
+        tuplet_divisor = nt.get("tuplet_divisor") if nt else None
         acoustic = annotations.latest_value(note.id, ACOUSTIC_ACTIVITY_ANNOTATION_KIND)
         by_stem[note.stem].append(NotationNote(
             pitch=note.pitch, start_ms=start_ms, end_ms=end_ms,
             velocity=note.velocity, source_note_id=note.id, is_tuplet=is_tuplet,
+            tuplet_divisor=tuplet_divisor,
             cohesion=uni_cohesion.get(note.id),
             trailing_resonance=(acoustic or {}).get("trailing_resonance"),
             trailing_void=(acoustic or {}).get("trailing_void"),
@@ -417,7 +461,10 @@ def build_routed_score(
         # bass that would otherwise trip the polyphony test, so cap it hard at
         # 2 voices (a real occasional double-stop, nothing more).
         if stem == StemType.BASS:
-            voiced = assign_voices(nns, max_voices=2, smooth=True, ms_per_beat=ms_per_beat)
+            voiced = assign_voices(nns, max_voices=2, smooth=True, ms_per_beat=ms_per_beat,
+                                   fill_max_beats=fill_max_beats,
+                                   beats_per_bar=time_signature[0],
+                                   bar_origin_ms=bar_origin_ms)
             parts.append(NotationPart(family=dominant, voice_id="bass::line",
                                       stem=stem, notes=voiced, is_drum=False))
             continue
@@ -432,12 +479,14 @@ def build_routed_score(
             gs = build_grand_staff(nns, tempo_bpm, time_signature, key,
                                    ratio_family=ratio_family, max_voices=max_voices,
                                    family=gs_label, fill_max_beats=fill_max_beats,
-                                   beats_per_bar=time_signature[0])
+                                   beats_per_bar=time_signature[0],
+                                   bar_origin_ms=bar_origin_ms)
             parts.extend(gs.parts)
         elif _max_simultaneity(nns) >= _POLYPHONY_VOICE_THRESHOLD:
             voiced = assign_voices(nns, max_voices=max_voices, smooth=True,
                                    ms_per_beat=ms_per_beat, fill_max_beats=fill_max_beats,
-                                   beats_per_bar=time_signature[0])
+                                   beats_per_bar=time_signature[0],
+                                   bar_origin_ms=bar_origin_ms)
             parts.append(NotationPart(family=dominant, voice_id=f"{label}::poly",
                                       stem=stem, notes=voiced, is_drum=False))
         else:
@@ -447,7 +496,7 @@ def build_routed_score(
     parts.sort(key=lambda p: (p.is_drum, -p.mean_pitch))
     return NotationScore(parts=parts, tempo_bpm=tempo_bpm,
                          time_signature=time_signature, key=key, ratio_family=ratio_family,
-                         musical_time=musical_time)
+                         musical_time=musical_time, bar_origin_ms=bar_origin_ms)
 
 
 __all__ = [

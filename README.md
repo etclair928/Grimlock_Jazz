@@ -91,6 +91,24 @@ analysis — it is **not** read by the pipeline (the Conductor always separates
 fresh) and is kept out of git (large, reproducible audio). Rebuild or extend
 it with `tools/build_stem_cache.py`.
 
+## Tests
+
+```bash
+python -m pytest
+```
+
+`tests/test_audit_fixes.py` pins the arithmetic underneath the pipeline's
+decisions — key-signature mode, notation durations, the quantizer's grid
+phase, meter propagation, the MIDI beat-tick alignment, and MusicXML
+validity. Every one is a pure function over plain data: no audio, no models,
+no separation, so the whole suite runs in about a minute and most of it in
+milliseconds. It exists because this project measures its *decisions*
+carefully and had nothing pinning the conversions those measurements sit on
+— a correct measurement can rest on a wrong conversion indefinitely.
+
+`university/test_detectors.py` is a separate `__main__` script (synthetic
++/- tests per pattern detector); run it directly.
+
 ## Design docs
 
 `GRIMLOCK_6.0_DESIGN_DECISIONS.md` (the architecture bible) and

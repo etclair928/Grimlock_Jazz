@@ -2065,3 +2065,412 @@ vs 0.201 (naked wins precision, as it should with 2,125 notes against our
    delivered).
 5. **Piano detection** - the ceiling, and the only item outside the notation
    layer (Chopin 69.1%, Ellington 62.1% recoverable from raw detection).
+
+---
+
+## XXIII. The audit session — nine defects, the tuplet unblock, and the measurement that moved the target (2026-08-18/19)
+
+*A code audit that turned into a measurement session. Nine reproduced defects
+fixed, tuplets unblocked outside compound meter, the Beat Hierarchy made a
+tested module - and then two instruments (`event_survival_audit`, a new
+injection self-test) established that neither the notation layer nor the timing
+layer is where the answer-key gap lives, and that one of our two headline
+timing statistics is not observable at all.*
+
+### XXIII.0 The nine defects — all reproduced by running the code, all fixed
+
+Each was reproduced against `../Symphony/.venv` before and after; the console
+excerpts live in the commit and in `tests/test_audit_fixes.py`.
+
+| # | defect | evidence |
+|---|---|---|
+| 1 | `_key_pitch_classes` transposed a minor key's set down 3 semitones, landing on the PARALLEL major | in A minor, `key_fit` called C♮ out-of-key and C♯ in-key |
+| 2 | `Key(key.replace("m",""))` handed music21 the parallel major | `Am` engraved with 3 sharps; MIDI and MusicXML disagreed about the same transcription's key |
+| 3 | notation durations capped at ONE BEAT | a 4-beat whole note exported as a quarter + 3 beats of manufactured rest |
+| 4 | the groove quantizer's grid had no PHASE (`k * period_ms` from t=0) | a note landing exactly on tracked beat 1 (800.0ms) "snapped" to 789.5ms |
+| 5 | the resolved meter never reached anything that quantizes | `resolve_tempo` defaults to (4,4) and meter resolves 40 lines later; with 6/8 resolved, `build_lattice` still used 4 subdivisions |
+| 6 | MIDI beat grid misaligned for pickups of 50ms–half a beat | beat 0 landed at tick 168 of a 480-tick beat, displacing every beat in the file |
+| 7 | the gap clamp assigned a raw `gap` to `quarterLength`, bypassing `_representable` | 1/3 + 1/4 = 0.5833 — the 24:13 shape |
+| 8 | `allow_triplet` REPLACED the binary grid rather than widening it | a plain eighth inside a tuplet beat snapped 0.5 → 0.667 |
+| 9 | `_normalize_voice_numbers` stripped the MusicXML DOCTYPE | ElementTree round-trip does not preserve it |
+
+**Structural findings alongside them:**
+
+- `MusicalTime` was "the only currency" in name only — `notation_quantizer`
+  carried a SECOND implementation of `to_beats`/`to_ms` with the same
+  interpolation and none of the glitch-confidence logic. Deleted; the map is now
+  threaded into the lattice judge, the rhythm inference and both score builders.
+- The **downbeat phase was computed in three places and consumed in none**:
+  `estimate_time_signature` unpacked it into `_phase` and dropped it,
+  `detect_pickup` was exported and never called, madmom's downbeats stopped at
+  the octave arbiter. Two downstream modules each invented their own barline
+  origin. Now resolved into `TempoMeter.downbeat_times_ms` and out to both.
+- `resolve_tempo` returns a weighted `tempo_bpm` but the ANCHOR witness's
+  `beat_times_ms` — two facts that can describe different pulses inside the one
+  type §9 created to stop exactly that.
+- `save_intermediate_path` does **not** store `beat_times_ms`, so a saved run
+  cannot re-export its own notation. Found when a Hopeful re-export could not
+  reconstruct its grid. Still open.
+
+**One finding WITHDRAWN.** `core/window_pane.py` was flagged as dead by an
+import-graph scan. Its header says it is deliberately staged for a live
+dashboard and pre-empts this exact finding. The scan was not a substitute for
+reading the module. Left untouched.
+
+### XXIII.1 Meter — FIXED, and the root cause was the grid we sample on
+
+Two changes, measured across the library by the new `tools/meter_harness.py`.
+
+**The meter test was being sampled on a grid this project already documents as
+wrong.** `build_phase_locked_grid` rebuilds an isochronous grid from one scalar
+tempo. MEASURED on Chopin (beat CV 0.168, local tempo 63–102):
+
+- the isochronous grid sits a median **194ms** from the tracked beats, up to
+  394ms, with **48% of beats more than 200ms away**;
+- sampled on it, **no meter candidate is significant at all** and 4/4 collapses
+  to score 0.0217, so the estimator returns its (4, 4, 0.3) fallback;
+- sampled on the **tracked beats**, the same estimator returns 4/4 at score
+  0.159–0.186, significant, phase 0 — which is what the published edition says.
+
+**madmom's downbeat witness has an uninformative confidence for its numerator.**
+It answers **6 on four songs of five** whatever the truth is, and its
+`mode_share` term is **1.00 everywhere**. The spacing-CV half of its confidence
+IS informative across songs: where it is right it is confident (No Pasarán
+0.920, HRV 0.877, Hopeful 0.533) and on the one song it is badly wrong it is not
+(Chopin **0.384**). A floor at 0.50 lets two agreeing calibrated witnesses carry
+a beat the trained one cannot see.
+
+Scored under §XVII.3's metrical-equivalence rule:
+
+| rule | Chopin (4) | HRV (3) | Hopeful (6) | No Pasarán (4) | |
+|---|---|---|---|---|---|
+| isochronous + sum *(shipped)* | 6 ✗ | 6 ✓ | 6 ✓ | 4 ✓ | 3/4 |
+| tracked + sum | 6 ✗ | 6 ✓ | 6 ✓ | 4 ✓ | 3/4 |
+| tracked + agreement-first | 4 ✓ | 4 ✗ | 3 ✓ | 4 ✓ | 3/4 |
+| **tracked + sum + downbeat floor 0.50** | **4 ✓** | **6 ✓** | **6 ✓** | **4 ✓** | **4/4** |
+
+Verified end to end: **Chopin now resolves 4/4** (was 6/4, against a published
+edition), **Hopeful holds at 6/4**, and Hopeful's key is now **B♭ minor** where
+every previous version wrote 5 sharps.
+
+**HONEST ABOUT THE THRESHOLD.** 0.50 is a round number in the single gap between
+0.384 and 0.533 in a four-song sample. The RULE is principled — an uncalibrated
+witness should not outweigh two calibrated ones, the same shape as
+`OCTAVE_ARBITER_MIN_CONFIDENCE` — but the VALUE is fitted to very little.
+
+### XXIII.2 §XVII.3 and §XXII.6 contradict each other, and it changes that table
+
+§XVII.3 says Hopeful's 6/4 against Klangio's 3/4 is *"the same pulse — 6/4 is
+two 3/4 bars"* and **withdraws** the suspicion. §XXII.6 calls the identical
+relationship on Old Soul's Patience and HRV *"the bar-doubling bug"*, confirmed
+by an answer key.
+
+The harness above scores HRV's 6 as **correct** under the first reading. Under
+the second it is a **failure** and the score is 3/4, not 4/4. Same data,
+opposite verdicts, and no way to settle it from inside the codebase. **This
+needs a ruling before any meter score is quoted.**
+
+### XXIII.3 Tuplets — the structural block, found and removed
+
+**Do we have real triplets?** Yes — 3:2 was always the majority of our tuplets.
+**Could we have anything else?** No, and for three reasons in series:
+
+1. the notatable set was binary + exactly four triplet values, so a sextuplet's
+   1/6 flattened to 1/8, a quintuplet's 1/5 to 1/4, a 12-tuplet's 1/12 to 1/8;
+2. `tuplet_divisor` was written by the model and **never read** by the page —
+   `notation_score` took only the `is_tuplet` bool, so the NUMBER was dropped at
+   the page boundary;
+3. given only a quarter-length, music21 renders 1/6 as two **3:2** groups, not
+   one **6:4** — a different-but-equivalent reading it picks on its own.
+
+**The Chopin edition is 6:4 ×297 of 507 tuplets.** The dominant tuplet in the
+piece was precisely the one we could not write. Fixed by making the notatable
+set divisor-aware and built from exact `Fraction`s, threading the divisor
+through to the exporter, and STATING the bracket instead of letting it be
+inferred. Verified in **4/4** — nothing in that path consults the time
+signature, which answers §XXII.3 directly:
+
+```
+tuplet ratios emitted: {'3:2': 3, '5:4': 5, '6:4': 6, '7:4': 7}   junk: none
+```
+
+Exact fractions also remove the accumulated-float-error source: `24:13`,
+`48:43` and `192:127` are not tuplets anyone detected, they are binary-float
+sixths being reconciled.
+
+### XXIII.4 The beat vocabulary — a bigger hole than the tuplet ceiling
+
+`_BEAT_VOCABULARY` held nine hand-authored fillings and **every one of them
+began at 0.0**, so a beat that does not start with a note — one beginning with a
+rest, or under a note held over — was inexpressible. MEASURED on Chopin:
+**75% of beats carrying a single onset have it at or past 0.125 of the way
+through**, median **0.452**.
+
+Replaced with a **subdivision-subset model**: divide the beat into `d` equal
+parts, strike any subset, assign onsets to slots by exact monotone alignment
+(a DP, not independent rounding — two onsets must not collapse onto one slot).
+It subsumes the entire old vocabulary by construction (`dotted_eighth_sixteenth`
+is `{0, 3/4}` on d=4; `eighth_triplet` is the full d=3 grid).
+
+A second defect fell out: **13.9% of onset groups were assigned to the previous
+beat**, a spike of 163 in the final sixteenth mirroring 185 in the first — the
+same musical event split by the boundary. Onsets within 1/16 of the next beat
+now belong to it.
+
+**Beat-level rhythmic coverage: 18.8% → 23.8% → 97.3% → 98.5%** (fixed
+vocabulary → even divisions → subset model → edge-snap).
+
+### XXIII.5 Beat Hierarchy — the user's specification, as a tested module
+
+`output/beat_hierarchy.py` + `tests/test_beat_hierarchy.py` (14 tests). The
+four stated levels collapse to **one rule**: *a note may cross a boundary only
+if it starts on a position at least as strong as that boundary* — with the
+barline as an absolute exception nothing crosses, including a note that started
+on one. (Writing that test caught the bug: barline-vs-barline was not
+"stronger", so a note starting on a downbeat could run through the next.)
+
+Compound meters group in threes; **odd meters get no invented half-measure** —
+3/4, 5/4 and 7/8 have no unambiguous middle and a boundary where no reader
+expects one is worse than none. 7/8 grouping (2+2+3 vs 3+2+2) remains an open
+musical decision.
+
+**Tuplet rules, per user directive:** the FRAME is anchored, not the first note
+— a tuplet rest may hold slot 0, so a figure beginning on "ple" or "let" is
+writable. A tuplet never leaves its beat, hence never crosses a barline. A
+displaced or half-empty grid is not a tuplet and falls back to binary.
+
+### XXIII.6 Shuffle — the prior was overriding the evidence
+
+*User: "a lot of rhythms in the song are Triplets. As it is a shuffle. Written
+and transcribed as 16th notes but they should be even 8th note triplets."*
+
+MEASURED on a textbook shuffle beat (onsets at 0.0 and 0.667):
+
+```
+d=3  2_of_3[0,2]   sse 0.0000  PERFECT fit   cost 4.90   posterior -2.448
+d=4  2_of_4[0,3]   sse 0.0069  worse fit     cost 3.50   posterior -2.288   WON
+```
+
+A perfectly-fitting triplet lost to a worse-fitting binary reading on the flat
++2.0 tuplet penalty alone. That penalty describes a pop page, not a shuffle. The
+correction needs no new constant: `swing_ratio` is already measured per track by
+`estimate_groove`, so the penalty on divisors of three now fades as measured
+swing approaches a true triplet feel. Hopeful measured **0.5864** (and the raw
+in-gap onset distribution peaks squarely in the 0.60–0.70 bucket, 51 of 187).
+
+**Result: 3:2 went 258 → 753, tuplet share 3.55% → 10.26%** — now 3× Klangio's
+3.45% on the same song. Straight tracks are unaffected and binary 16ths on a
+swung track stay binary.
+
+**THE COST, PREDICTED BY §XVII.15 TWELVE DAYS EARLIER.** Junk ratios **29 → 93**
+and sub-32nd share **0.30% → 1.77%**. §XVII.15: *"They appear exactly where
+rhythm_inference's per-beat verdict says triplet while neighbouring beats say
+binary, putting k/3 and k/4 positions in one measure (12 = lcm(3,4))."* Making
+triplets cheaper made more mixed-grid measures. The lever is beat-to-beat grid
+CONSISTENCY upstream — and §XVII.15 also warns that three exporter-side attempts
+have already failed. A fourth was attempted this session and is part of the 93.
+
+**Also open:** the pickup. `_origin_before` now keeps the resolved downbeat and
+steps back whole bars (verified on a synthetic 6/4 with a 3-beat anacrusis: the
+big ONE lands on measure 2 beat 1), but on Hopeful measure 1 is still a full
+6.000 because **the phase detection returned 0** — the accent evidence did not
+clear `PICKUP_MIN_CONFIDENCE`. The plumbing works; the detection does not.
+`detect_pickup` remains the unwired lever, and the user has supplied the answer
+(3 beats in 6/4), which makes it directly testable.
+
+### XXIII.7 DECISIVE — the notation layer is not where the notes are lost
+
+`tools/event_survival_audit.py` on Chopin, answer-key recall at every stage:
+
+```
+1. Basic Pitch (raw)              62.9%
+2. + onset refinement             63.0%   +0.1
+3. + sustain recovery             63.0%   +0.0
+4. + consolidation                62.7%   -0.3
+5. + legitimacy filter            62.7%   +0.0
+6. + notation quantization        62.6%   -0.1
+```
+
+**The entire pipeline costs 0.3 points.** This retires an argument rather than
+advancing it: no amount of notation work can raise answer-key recall, and
+§XVI.7's "our over-detection filters are inert" is confirmed from the other side
+— the legitimacy filter contributes exactly +0.0.
+
+### XXIII.8 REFRAME — it is a PRECISION problem, not a detection-capability one
+
+At a generous 0.75s tolerance, Chopin:
+
+```
+recall 0.903   precision 0.429    false positives 1096    misses 89
+
+FALSE POSITIVES BY SHAPE            BY STEM (solo piano!)
+  same pitch class, octave off  61.2%    bass    354 of  463  (76.5%)
+  unison duplicate              21.3%    vocals  129 of  200  (64.5%)
+  unrelated pitch                7.5%    other   669 of 1257  (53.2%)
+  no key note sounding           5.1%
+  +19/+24 harmonic               4.9%
+```
+
+**We hear 90% of the edition and emit twice too much.** Only 89 notes are
+genuinely missed. So the earlier framing — "detection is the ceiling, we need a
+better model" — was wrong: a piano-specific model would fix the 89, not the
+1096.
+
+Two-thirds of the errors are *octave copies of notes actually sounding*, which
+is what transcribing separated stems produces: each stem carries harmonics of
+the same piano note, so one note is counted three times at three octaves. And on
+a **solo piano recording** the bass and vocals stems are 76% and 64% wrong —
+the same disease as the 1546 phantom drum hits this run produced on a nocturne.
+
+**We have filters for this and none of them targets an octave copy.**
+`check_range` exists but is annotation-only with `drop_purge_candidates` off.
+
+### XXIII.9 Timing — not lag, not drift, not snapping
+
+```
+                      within 0.10s   within 0.25s     std
+RAW Basic Pitch          32.3%          69.2%       0.2654
+NOTATION-QUANTIZED       34.1%          71.4%       0.2590
+```
+
+- **Not a systematic lag**: mean −24ms, median −40ms, 42% late / 58% early.
+- **Not drift**: linear trend **+0.84 ms per second** of audio, and the
+  per-window means do not march in one direction.
+- **Not snapping**: quantization slightly IMPROVES the distribution. A clean
+  negative — the grid is not throwing notes off.
+
+It is symmetric jitter, and a third of it was the ruler. Sweeping the scorer's
+alignment resolution with the transcription held fixed:
+
+```
+ steps   s/step     std    <0.10s   <0.25s
+   450    0.397   0.3154    29.2%    59.8%
+   900    0.199   0.2654    32.3%    69.2%
+  1800    0.099   0.2260    49.6%    79.1%
+  3600    0.050   0.2163    57.4%    80.8%
+```
+
+The default 900 gave 0.199 s/step on a metric graded at ±0.25s. Raised to 1800.
+On Chopin's MIDI this alone moved **recall 0.645 → 0.776 and F1 0.427 → 0.514
+with no change to the transcription.** Every answer-key number quoted before
+this fix was depressed by the instrument.
+
+### XXIII.10 DECISIVE NEGATIVE — the scorer cannot see a timing bias at all
+
+`tools/scorer_selftest.py` injects a known offset and asks the scorer to recover
+it. On Chopin:
+
+```
+injected   recovered        injected   recovered
+   -400ms      44.0ms          +100ms      39.6ms
+   -100ms      47.4ms          +400ms      42.3ms
+      0ms      46.6ms
+
+recovered = -0.005 x injected + 44.5 ms      dtw cost 0.2141 -> 0.2169
+```
+
+Shifting **every note by ±400ms** moves the recovered bias by **less than 8ms**.
+Chroma-DTW with an open end slides its path to absorb a global translation; the
+alignment cost barely registers it.
+
+**Consequences:**
+
+- Every δ this tool has reported is an artifact of the alignment's freedom to
+  slide, not pipeline latency. The −24ms and +46.6ms measured this session are
+  both meaningless AS BIAS.
+- Phase calibration against this reference is not merely low-value (δ/σ = 0.13);
+  it is **unmeasurable**. Fitting δ̂ here fits the reference's noise.
+- σ, by contrast, holds at 366–386ms across every injection — **spread is
+  observable, bias is not**, which is the expected signature of a monotone-path
+  alignment. The variance-dominated conclusion stands.
+- A globally shifted score is still a correct score, so for NOTATION this blind
+  spot is tolerable. For any claim about latency accuracy it is not.
+
+### XXIII.11 Instruments built, and one that had to be calibrated against truth
+
+- `tools/meter_harness.py` — meter only, across the library, against known
+  answers. Both grids × both vote rules, so the grid question and the vote
+  question stop being confounded.
+- `tools/tuplet_audit.py` — barline crossings, frame anchoring, ratio census.
+- `tools/compare_versions.py` — every export of one song side by side on
+  rest/note, tie/note, chord/note, tuplet%, junk, sub-32nd share.
+- `tools/scorer_selftest.py` — injection-recovery for the scorer itself.
+- `tools/score_vs_answer_key.py` — now reports RMSE, a Gaussian soft-recall
+  scored over EVERY reference note (a miss costs a real zero, so no threshold
+  can quietly exclude it), and δ/σ with a plain verdict on whether calibration
+  would pay.
+
+**`tuplet_audit` FAILED the published Chopin edition three times before it was
+right**, and each failure was the tool's:
+
+1. it called `14:2` un-notatable because 14 > 12 — Chopin writes 14-tuplets.
+   Junk is a nonsensical NORMAL count (13, 19, 43), not a large actual one.
+2. it counted every note INSIDE a tuplet as a group start (music21 leaves
+   `type=None` on middle notes) — 415 phantom violations in an edition with none.
+3. it demanded whole-beat anchoring; the edition anchors `4:3` and `8:2` groups
+   to the second EIGHTH of a beat, which is standard.
+
+**Run an auditor against known-good ground truth before trusting it on your own
+output.** The edition file itself then showed 2 tuplet notes crossing a barline
+in bars 50/52 — an encoding artifact of that MusicXML, a reminder that the
+answer key is ground truth for CONTENT, not for byte-perfect encoding.
+
+**Testing:** 1 non-discoverable script → **53 tests** with a `pytest.ini`.
+
+### XXIII.12 Process failures worth recording
+
+- **Stale numbers reported three times.** A re-export crashed after a patch
+  (two `_apply_tuplet` definitions, the old shadowing the new and returning
+  `None`), the audit kept reading a file from an earlier run, and three
+  "different" fixes produced byte-identical output before the log was opened.
+  Identical output across different changes is a signal, not a coincidence.
+- **Blind patching.** Several fixes were applied by string-replacement without
+  reading the surrounding code; one deleted the drum-position table along with a
+  duplicate function. Restored from git.
+- **A fix that made things worse before better.** Rejecting non-anchored tuplets
+  and falling back to the binary grid ROUNDED sub-32nd scraps UP to 0.125, and
+  lengthening notes pushed barline crossings from 1 to 50. Shortening is always
+  safe; lengthening never is.
+
+### XXIII.13 Where we stand
+
+**Two different projects have been conflated, and they have different verdicts.**
+
+*The page* is measurably better: `rest/note` 0.447 → 0.280 (best ever, against
+Klangio's 0.089), tuplets structurally possible outside compound meter for the
+first time, meter right on Chopin and held on Hopeful, key right on Hopeful, the
+hierarchy enforced and tested.
+
+*The answer-key number* did not move for any notation reason, and §XXIII.7 shows
+it cannot. What moved it was fixing the instrument (0.427 → 0.514).
+
+### XXIII.14 Revised leverage ranking (supersedes XVIII.5)
+
+1. **Gate separation on whether the stems are real.** Kills ~44% of false
+   positives outright and stops the drum staff on a nocturne. Cheapest item on
+   this list by a wide margin, and it is a precision AND a timing fix — the
+   bass/vocals stems also carry the only systematic onset biases (−61ms, −98ms).
+2. **An octave-collapse pass** on co-occurring same-pitch-class notes, deciding
+   the fundamental from the stem's own spectrum. Targets 61% of the remaining
+   errors — the filter we do not have.
+3. **Beat-to-beat grid consistency** in `rhythm_inference` (§XVII.15's lever,
+   now urgent because the shuffle fix fed the mechanism). NOT another exporter
+   patch; four have failed.
+4. **Wire `detect_pickup`** — written, exported, still called from nowhere, and
+   the one thing standing between us and correct barlines on a song with an
+   anacrusis.
+5. **Deduplicate unisons** — 21.3% of false positives, mechanical.
+6. **Emit the tempo curve to the page** (§XXII.8 #1) — still purely additive,
+   still uncomputed on the MusicXML side. Note the MIDI already carries a
+   multi-segment map (187 segments on Chopin); only the page shows one mark.
+7. **Store `beat_times_ms` in the intermediate** — one line; without it a saved
+   run cannot reproduce its own notation.
+8. **Settle §XXIII.2** — the metrical-equivalence contradiction. A ruling, not
+   an implementation.
+
+**Through-line, updated.** §XVIII.5 said the codebase was carrying *unconsumed
+evidence*. It still is — `detect_pickup`, the downbeat phase until this session,
+`tuplet_divisor` until this session. But the larger finding is that we have been
+**optimising the half of the pipeline that cannot move the number we are
+grading ourselves on**, while the other half emits two wrong notes for every
+right one and nobody has built the filter that would catch them.

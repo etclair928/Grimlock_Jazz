@@ -202,11 +202,20 @@ def analyze_key(engine: AudioEngine, track: AudioTrack) -> KeyResult:
 
 
 def _key_pitch_classes(key: str) -> Set[int]:
+    """The 7 diatonic pitch classes of `key`.
+
+    BUG FIX (2026-08-17 audit): a minor key's pitch classes are IDENTICAL to
+    its relative major's - that is what "relative" means. This transposed the
+    relative major's set down 3 semitones, which lands on the PARALLEL MAJOR:
+    Am reported {C#,D,E,F#,G#,A,B} (A major) instead of {A,B,C,D,E,F,G}, so
+    key_fit called the tonic triad's own third out-of-key and the raised third
+    in-key on every minor-key song. Verified before/after with the table in
+    tests/test_key_detector.py.
+    """
     if key in _MAJOR_KEY_PITCH_CLASSES:
         return _MAJOR_KEY_PITCH_CLASSES[key]
     if key in _MINOR_RELATIVE_MAJOR:
-        major_set = _MAJOR_KEY_PITCH_CLASSES.get(_MINOR_RELATIVE_MAJOR[key], {0, 2, 4, 5, 7, 9, 11})
-        return {(pc - 3) % 12 for pc in major_set}
+        return _MAJOR_KEY_PITCH_CLASSES.get(_MINOR_RELATIVE_MAJOR[key], {0, 2, 4, 5, 7, 9, 11})
     return {0, 2, 4, 5, 7, 9, 11}
 
 

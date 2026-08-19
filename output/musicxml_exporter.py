@@ -25,10 +25,16 @@
 
 from __future__ import annotations
 
+import copy
+import math
+
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
 
 from output.notation_score import NotationScore, NotationPart, NotationNote
+from fractions import Fraction
+from output.beat_hierarchy import split_for_hierarchy
+from quantization.duration_witness import nearest_notatable, notatable_at_most
 
 # music21 quarterLength is in quarter notes. ms -> quarterLength needs the
 # tempo: at T BPM one quarter note is 60000/T ms.
@@ -60,65 +66,258 @@ _GM_PROGRAM: Dict[str, int] = {
 _TERNARY_RATIO_FAMILIES = frozenset({"ternary", "swing"})
 
 
-# Durations a single notehead can actually express, in quarter-lengths.
-# Snapping to a GRID is not enough: a k/3 triplet grid happily produces 5/3 and
-# 7/3, which no note value represents, so music21 invents ratios like 24:13 and
-# 12:7 to make the arithmetic work and MuseScore boxes the measure in red
-# because it cannot reconcile them either. Snapping to this explicit SET makes
-# every emitted duration notatable by construction.
-_BINARY_DURATIONS = (0.125, 0.25, 0.375, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0)
-_TRIPLET_DURATIONS = (1.0 / 3.0, 2.0 / 3.0, 4.0 / 3.0, 8.0 / 3.0)
+# Durations a single notehead can actually express, in quarter-lengths. The
+# table itself lives in quantization.duration_witness - rhythm_inference needs
+# the same vocabulary when it decides how long to hold a note, and two copies
+# of one fact is how the two layers drift apart (2026-08-17 audit).
+_representable = nearest_notatable
+_representable_at_most = notatable_at_most
 
 
-def _representable(ql: float, allow_triplet: bool) -> float:
-    """Nearest duration a notehead can actually be written as."""
-    allowed = _BINARY_DURATIONS + (_TRIPLET_DURATIONS if allow_triplet else ())
-    return min(allowed, key=lambda a: abs(a - ql))
+# A ternary value has to beat the binary one by this margin (in quarter-lengths)
+# before it wins. Ties and near-ties go binary: a triplet is the more expensive
+# reading for both the engraver and the player, so it should have to earn the
+# call rather than win a coin flip.
+_TERNARY_PREFERENCE_MARGIN = 1e-4
 
 
-def _snap_quarter_length(ql: float, allow_triplet: bool) -> float:
+def _snap_quarter_length(ql: float, allow_triplet: bool, divisor=None):
     """Snap a quarter-length to the 16th grid, or - when this note carried a
     beat-level TRIPLET VERDICT and the piece's ratio family permits tuplets -
-    to the triplet grid. The verdict comes from rhythm_inference (decided once
-    per beat), never re-guessed here from the rounded duration: that per-note
-    guessing manufactured 3210 tuplets > 4971 noteheads on the first pass."""
+    to whichever of the 16th and triplet grids is NEARER. The verdict comes
+    from rhythm_inference (decided once per beat), never re-guessed here from
+    the rounded duration: that per-note guessing manufactured 3210 tuplets >
+    4971 noteheads on the first pass.
+
+    BUG FIX (2026-08-17 audit): `allow_triplet` used to REPLACE the binary grid
+    rather than widen the vocabulary, so a plain eighth inside a tuplet-flagged
+    beat snapped 0.5 -> 0.667. That put binary and ternary positions in the same
+    measure, and their differences are exactly the un-notatable leftovers that
+    made music21 invent ratios like 24:13. "Allow" now means allow, not force.
+    """
     binary = round(ql * 4.0) / 4.0        # nearest 16th
-    if allow_triplet:
-        return round(ql * 3.0) / 3.0      # nearest triplet-eighth
+    if divisor:
+        # This beat was READ as a `divisor`-part tuplet, so its own grid is the
+        # right one to land on - and EXACTLY, as a Fraction. Summing a handful
+        # of binary-float sixths lands on no rational music21 recognises, which
+        # is where 24:13 and 48:43 came from: not tuplets anybody detected,
+        # just accumulated float error being reconciled.
+        tuplet = Fraction(round(ql * divisor), divisor)
+        if abs(ql - float(tuplet)) + _TERNARY_PREFERENCE_MARGIN < abs(ql - binary):
+            return tuplet
+        return binary
+    if not allow_triplet:
+        return binary
+    ternary = round(ql * 3.0) / 3.0       # nearest triplet-eighth
+    if abs(ql - ternary) + _TERNARY_PREFERENCE_MARGIN < abs(ql - binary):
+        return ternary
     return binary
 
 
-# THE TWO CONVERSIONS THAT DECIDE WHICH BAR A NOTE LANDS IN.
+# THE CONVERSION THAT DECIDES WHICH BAR A NOTE LANDS IN.
 #
-# Both used to divide by a constant `60000/tempo_bpm`. MEASURED (2026-08-11):
+# It used to divide by a constant `60000/tempo_bpm`. MEASURED (2026-08-11):
 # fixing the quantizer's snap alone moved Chopin recall only +9.6%, because
-# these two then converted the correctly-placed milliseconds back to bar
-# positions at a fixed rate and undid it. A tempo map has to be the ONLY
-# currency, or every site that isn't converted silently reverts the ones that
-# are. `musical_time` is threaded through from the score; when it is absent the
-# old constant-rate behaviour is preserved exactly.
-
-def _quarter_length(duration_ms: float, tempo_bpm: float, allow_triplet: bool = False,
-                    musical_time=None, start_ms: Optional[float] = None) -> float:
-    if musical_time is not None and musical_time.usable and start_ms is not None:
-        # A duration is STRUCTURAL: measure it in beats, so both ends move
-        # together under rubato and a stretched quarter still reads as a quarter.
-        ql = _snap_quarter_length(
-            musical_time.to_beats(start_ms + duration_ms) - musical_time.to_beats(start_ms),
-            allow_triplet)
-    else:
-        ms_per_quarter = 60000.0 / max(tempo_bpm, 1.0)
-        ql = _snap_quarter_length(duration_ms / ms_per_quarter, allow_triplet)
-    return max(_MIN_QUARTER_LENGTH, ql)   # never let a real note vanish to zero
-
+# this then converted the correctly-placed milliseconds back to bar positions
+# at a fixed rate and undid it. A tempo map has to be the ONLY currency, or
+# every site that isn't converted silently reverts the ones that are.
+# `musical_time` is threaded through from the score; when it is absent the old
+# constant-rate behaviour is preserved exactly.
+#
+# There used to be a second conversion here, `_quarter_length`, computing a
+# note's DURATION the same way. It was dead: build_music21_score derives every
+# duration from the difference of two snapped OFFSETS (so each voice tiles its
+# bar exactly) and overwrote _quarter_length's result unconditionally. Deleted
+# 2026-08-17 rather than left looking load-bearing - a duration measured
+# through this function is a duration measured through musical_time, since both
+# of its endpoints are.
 
 def _offset_quarter_length(start_ms: float, origin_ms: float, tempo_bpm: float,
-                           allow_triplet: bool = False, musical_time=None) -> float:
+                           allow_triplet: bool = False, musical_time=None,
+                           divisor=None):
     if musical_time is not None and musical_time.usable:
         pos = musical_time.to_beats(start_ms) - musical_time.to_beats(origin_ms)
-        return max(0.0, _snap_quarter_length(pos, allow_triplet))
+        return max(0.0, _snap_quarter_length(pos, allow_triplet, divisor))
     ms_per_quarter = 60000.0 / max(tempo_bpm, 1.0)
-    return max(0.0, _snap_quarter_length((start_ms - origin_ms) / ms_per_quarter, allow_triplet))
+    return max(0.0, _snap_quarter_length((start_ms - origin_ms) / ms_per_quarter,
+                                         allow_triplet, divisor))
+
+
+# Denominator cap when converting a snapped offset to an exact Fraction. The
+# finest thing the rhythm layer emits is a twelfth of a beat, so 96 leaves
+# generous headroom while stopping a float artifact from becoming a 10007ths.
+_HIERARCHY_MAX_DEN = 96
+
+
+def _chain_tie(el, index: int, total: int) -> None:
+    """Tie one link of a hierarchy-split chain to its neighbours.
+
+    A split note is ONE sounding note wearing several noteheads, so the ties
+    are what stop it being read as several notes. Any tie the note already
+    carried (from tie_reconstruction) is subsumed: the chain's last link keeps
+    an existing tie-forward, the first keeps an existing tie-back."""
+    from music21 import tie as m21tie
+    had = el.tie.type if el.tie is not None else None
+    first, last = index == 0, index == total - 1
+    if first:
+        el.tie = m21tie.Tie("continue" if had in ("stop", "continue") else "start")
+    elif last:
+        el.tie = m21tie.Tie("continue" if had in ("start", "continue") else "stop")
+    else:
+        el.tie = m21tie.Tie("continue")
+
+
+def _clamp_to_beat_frame(onset, ql):
+    """Shorten `ql` so the event cannot leave the beat it started in.
+
+    A tuplet is a statement about how ONE metric unit is divided, so it must
+    end inside that unit - and since a beat never spans a barline, staying
+    inside the beat makes crossing a barline impossible too. Returns the
+    clamped length, which may be <= 0 when the event starts exactly on the
+    frame edge; the caller drops those.
+
+    CLAMP, NOT REJECT (corrected 2026-08-18). The previous version of this
+    guard rejected any tuplet whose onset was not exactly on a slot and fell
+    back to the binary grid - but the smallest binary value is 1/8 of a beat,
+    so a 1/12-beat scrap was rounded UP, and lengthening notes pushed 50 of
+    them over barlines where there had been 1. Shortening is always safe;
+    lengthening never is.
+
+    MEASURED ORIGIN (Chopin bar 29): the gap clamp handed _apply_tuplet a
+    1/24-beat leftover at offset 1.5417, which it faithfully rendered as a
+    64th triplet in a frame anchored to nothing, running 0.042 past the bar."""
+    import math as _math
+    frame_end = _math.floor(float(onset) + 1e-9) + 1.0
+    return min(float(ql), frame_end - float(onset))
+
+
+def _leading_tuplet_rest(onset, divisor: int):
+    """The tuplet rest that holds the frame on the beat when the first sounding
+    slot is not slot 0 - a rest on "Tri" before a note on "ple".
+
+    Returns (rest_offset, rest_element) or None when the note already starts on
+    its beat. The rest carries the SAME tuplet as the notes, which is what
+    keeps the container visibly anchored; an ordinary rest of the same
+    clock-length would sit outside the bracket and put the reader back where
+    they started, hunting for the beat.
+
+    Generalises to any divisor: the silent span is (onset - beat start), which
+    is always a whole number of tuplet slots because the onset was snapped onto
+    that grid."""
+    from music21 import note as m21note
+    beat_start = Fraction(int(Fraction(onset))) if onset >= 0 else Fraction(0)
+    silent = Fraction(onset) - beat_start
+    if silent <= 0:
+        return None
+    rest = m21note.Rest()
+    _apply_tuplet(rest, silent, divisor)
+    return float(beat_start), rest
+
+
+# Which "in the time of" a subdivision is written against: the largest power of
+# two at or below it, which is the convention every edition uses - 6 in the
+# time of 4, 5 in the time of 4, 7 in the time of 4, 12 in the time of 8.
+def _normal_count(divisor: int) -> int:
+    n = 1
+    while n * 2 <= divisor:
+        n *= 2
+    return n
+
+
+def _apply_tuplet(el, ql, divisor: int):
+    """Write `el` as a note inside a `divisor`-tuplet of one beat, lasting no
+    longer than `ql`. Returns the quarter-length actually used.
+
+    WHY THIS RETURNS A LENGTH, AND WHY IT ONLY EVER SHRINKS (2026-08-18).
+    A tuplet duration is (un-tupleted note value) x (normal/actual), so the
+    un-tupleted value has to be a REAL note type - a half, a quarter, a dotted
+    eighth. Handing music21 an arbitrary quarter-length and letting it derive
+    one lets it round UP, and a tuplet that came back longer than asked is what
+    put 64 notes past their barline after the caller had carefully clamped them
+    to the beat. So the value is chosen here, from the notatable set, rounding
+    DOWN - shortening is always safe, lengthening never is.
+
+    Left to itself music21 also derives the BRACKET from the quarter-length
+    alone, and 1/6 is as validly a sixteenth triplet (two 3:2 groups) as a
+    sextuplet (one 6:4). It picks the triplet, so a sextuplet - 297 of the 507
+    tuplets in the Chopin edition - never appeared under its own name however
+    correctly we detected it. The subdivision is known by this point; stating
+    it beats letting the serializer infer an equivalent-but-different reading."""
+    from music21 import duration as m21duration
+    normal = _normal_count(divisor)
+    if normal == divisor:                 # a power of two is not a tuplet
+        el.quarterLength = float(ql)
+        return float(ql)
+    # Largest REAL note value that still fits inside the requested length once
+    # the tuplet ratio is applied.
+    untupleted = notatable_at_most(float(ql) * divisor / normal)
+    used = untupleted * normal / divisor
+    if used <= 0 or used > float(ql) + 1e-9:
+        el.quarterLength = float(ql)
+        return float(ql)
+    try:
+        el.duration = m21duration.Duration(untupleted)
+        el.duration.appendTuplet(m21duration.Tuplet(divisor, normal))
+    except Exception:
+        el.quarterLength = used
+    return float(el.quarterLength)
+
+
+def _clamp_to_beat_frame(onset, ql):
+    """Shorten `ql` so the event cannot leave the beat it started in.
+
+    A tuplet is a statement about how ONE metric unit is divided, so it must
+    end inside that unit - and since a beat never spans a barline, staying
+    inside the beat makes crossing a barline impossible too. Returns the
+    clamped length, which may be <= 0 when the event starts exactly on the
+    frame edge; the caller drops those.
+
+    CLAMP, NOT REJECT (corrected 2026-08-18). The previous version of this
+    guard rejected any tuplet whose onset was not exactly on a slot and fell
+    back to the binary grid - but the smallest binary value is 1/8 of a beat,
+    so a 1/12-beat scrap was rounded UP, and lengthening notes pushed 50 of
+    them over barlines where there had been 1. Shortening is always safe;
+    lengthening never is.
+
+    MEASURED ORIGIN (Chopin bar 29): the gap clamp handed _apply_tuplet a
+    1/24-beat leftover at offset 1.5417, which it faithfully rendered as a
+    64th triplet in a frame anchored to nothing, running 0.042 past the bar."""
+    import math as _math
+    frame_end = _math.floor(float(onset) + 1e-9) + 1.0
+    return min(float(ql), frame_end - float(onset))
+
+
+def _leading_tuplet_rest(onset, divisor: int):
+    """The tuplet rest that holds the frame on the beat when the first sounding
+    slot is not slot 0 - a rest on "Tri" before a note on "ple".
+
+    Returns (rest_offset, rest_element) or None when the note already starts on
+    its beat. The rest carries the SAME tuplet as the notes, which is what
+    keeps the container visibly anchored; an ordinary rest of the same
+    clock-length would sit outside the bracket and put the reader back where
+    they started, hunting for the beat.
+
+    Generalises to any divisor: the silent span is (onset - beat start), which
+    is always a whole number of tuplet slots because the onset was snapped onto
+    that grid."""
+    from music21 import note as m21note
+    beat_start = Fraction(int(Fraction(onset))) if onset >= 0 else Fraction(0)
+    silent = Fraction(onset) - beat_start
+    if silent <= 0:
+        return None
+    rest = m21note.Rest()
+    _apply_tuplet(rest, silent, divisor)
+    return float(beat_start), rest
+
+
+# Which "in the time of" a subdivision is written against: the largest power of
+# two at or below it, which is the convention every edition uses - 6 in the
+# time of 4, 5 in the time of 4, 7 in the time of 4, 12 in the time of 8.
+def _normal_count(divisor: int) -> int:
+    n = 1
+    while n * 2 <= divisor:
+        n *= 2
+    return n
 
 
 # Percussion staff placement (GRIMLOCK_6.0_OPEN_PROBLEMS.md §XVI.10 item 2).
@@ -169,6 +368,31 @@ def _unpitched_for(pitch: int):
     return u
 
 
+def _m21_key(key: str):
+    """The pipeline's key string ("C", "Am") as a music21 Key, or None if it
+    can't be parsed (a bad key means no key signature, never a crash).
+
+    BUG FIX (2026-08-17 audit): this used to be `Key(key.replace("m", ""))`,
+    which hands music21 the PARALLEL MAJOR - Key("A") is A major, three sharps,
+    where A minor has none. Every minor-key export therefore carried the wrong
+    key signature and accidentals on nearly every diatonic note. music21
+    distinguishes mode by CASE: Key("a") is A minor. scribe_engraver's
+    _key_to_key_number already got this right for MIDI, so the two exports of
+    the same transcription disagreed about its key."""
+    from music21 import key as m21key
+    if not key:
+        return None
+    key = key.strip()
+    is_minor = key.endswith("m")
+    tonic = key[:-1] if is_minor else key
+    if not tonic:
+        return None
+    try:
+        return m21key.Key(tonic.lower() if is_minor else tonic)
+    except Exception:
+        return None
+
+
 def _clef_for(mean_pitch: float):
     from music21 import clef
     # Guitar/vocals read an octave high in treble (8vb); low parts get bass.
@@ -202,6 +426,26 @@ def _part_name(family: str, voice_tag: str, staff_index: int, staff_count: int) 
 # render at that position, so stacking them changes nothing about pitch or
 # time - only how many rhythmic slots (and therefore voices, and therefore
 # rests) the staff needs.
+def _origin_before(bar_origin_ms, earliest_ms, beats_per_bar, tempo_bpm, musical_time):
+    """Step the bar origin back whole bars until it is at or before the first
+    note, so a pickup sits inside a leading bar instead of moving every barline.
+
+    Whole BARS, never a partial step: the origin has to stay a real downbeat or
+    the barlines stop meaning anything, which is the whole point of having
+    resolved a downbeat at all."""
+    if bar_origin_ms <= earliest_ms:
+        return float(bar_origin_ms)
+    beats = max(1, int(beats_per_bar))
+    if musical_time is not None and getattr(musical_time, "usable", False):
+        origin_b = musical_time.to_beats(bar_origin_ms)
+        earliest_b = musical_time.to_beats(earliest_ms)
+        bars_back = math.ceil((origin_b - earliest_b) / beats)
+        return float(musical_time.to_ms(origin_b - bars_back * beats))
+    ms_per_bar = (60000.0 / max(tempo_bpm, 1.0)) * beats
+    bars_back = math.ceil((bar_origin_ms - earliest_ms) / ms_per_bar)
+    return float(bar_origin_ms - bars_back * ms_per_bar)
+
+
 def _chord_events_gridded(
         notes: List[NotationNote], tempo_bpm: float, origin_ms: float,
         ratio_family: Optional[str], musical_time=None) -> List[List[NotationNote]]:
@@ -209,7 +453,8 @@ def _chord_events_gridded(
     for nn in sorted(notes, key=lambda n: (n.start_ms, n.pitch)):
         allow = bool(nn.is_tuplet) or (ratio_family in _TERNARY_RATIO_FAMILIES)
         offset = _offset_quarter_length(nn.start_ms, origin_ms, tempo_bpm, allow,
-                                        musical_time=musical_time)
+                                        musical_time=musical_time,
+                                        divisor=getattr(nn, "tuplet_divisor", None))
         buckets.setdefault(round(offset, 6), []).append(nn)
     return [buckets[k] for k in sorted(buckets)]
 
@@ -299,8 +544,22 @@ def _normalize_voice_numbers(path: str) -> None:
     dense 1..N per part. music21's own export numbering is not reliably
     1-based (it emitted voice 0, which MuseScore rejects), so this makes
     the invariant true in the bytes on disk regardless of what music21
-    chose."""
+    chose.
+
+    BUG FIX (2026-08-17 audit): this used ElementTree.parse/write, which does
+    not preserve the DOCTYPE - so every export silently lost music21's
+    `<!DOCTYPE score-partwise PUBLIC ...>` line. MuseScore tolerates that;
+    validating parsers do not, and this module's own law is that a view may
+    render an upstream mess uglily but may never emit something that won't
+    open. The doctype is captured before the rewrite and restored after."""
+    import re
     import xml.etree.ElementTree as ET
+
+    with open(path, "r", encoding="utf-8") as fh:
+        original = fh.read()
+    doctype_match = re.search(r"^<!DOCTYPE[^>]*>", original, re.MULTILINE)
+    doctype = doctype_match.group(0) if doctype_match else None
+
     tree = ET.parse(path)
     root = tree.getroot()
     for part in root.findall(".//part"):
@@ -312,6 +571,20 @@ def _normalize_voice_numbers(path: str) -> None:
             v.text = seen[old]
     tree.write(path, encoding="UTF-8", xml_declaration=True)
 
+    if doctype is not None:
+        with open(path, "r", encoding="utf-8") as fh:
+            rewritten = fh.read()
+        if "<!DOCTYPE" not in rewritten:
+            # Slot it back between the XML declaration and the root element,
+            # which is the only place a doctype is legal.
+            lines = rewritten.split("\n", 1)
+            if len(lines) == 2 and lines[0].lstrip().startswith("<?xml"):
+                rewritten = f"{lines[0]}\n{doctype}\n{lines[1]}"
+            else:
+                rewritten = f"{doctype}\n{rewritten}"
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(rewritten)
+
 
 def build_music21_score(score: NotationScore, grid_chords: bool = True):
     """Returns a music21.stream.Score. Each NotationPart becomes one or
@@ -321,10 +594,36 @@ def build_music21_score(score: NotationScore, grid_chords: bool = True):
     from music21 import meter as m21meter, key as m21key, instrument as m21instrument
     from music21 import tie as m21tie
 
-    origin_ms = min(
+    # WHERE BAR 1 STARTS, AND WHERE THE PICKUP GOES.
+    #
+    # The resolved downbeat when the pipeline found one; otherwise the earliest
+    # note, which is only right by luck - a score whose first note is an upbeat
+    # gets every barline shifted by that upbeat's offset (2026-08-17 audit).
+    #
+    # THE min() THAT USED TO BE HERE THREW THE DOWNBEAT AWAY (fixed 2026-08-18).
+    # It clamped the origin to the earliest note so nothing could land at a
+    # negative offset - which meant that the moment ANY note preceded the
+    # downbeat, the downbeat was discarded and bar 1 restarted on the anacrusis.
+    # That is precisely the pickup case, so pickups were the one thing it broke:
+    # measured on Hopeful, which opens on beats 4-5-6 of 6/4, measure 1 came out
+    # a full 6.000 long and every barline after it sat three beats early, so the
+    # big ONE of the first full bar landed on measure 1 beat 4.
+    #
+    # The fix keeps the downbeat and steps the origin back a WHOLE number of
+    # bars until it is at or before the first note. Barlines then land on real
+    # downbeats, and the anacrusis occupies the tail of a leading bar instead of
+    # displacing the entire piece. (A short anacrusis MEASURE, rather than a
+    # full leading bar with rests, is the further refinement.)
+    earliest_ms = min(
         (n.start_ms for p in score.parts for n in p.notes),
         default=0.0,
     )
+    if score.bar_origin_ms is None:
+        origin_ms = earliest_ms
+    else:
+        origin_ms = _origin_before(score.bar_origin_ms, earliest_ms,
+                                   score.time_signature[0], score.tempo_bpm,
+                                   score.musical_time)
 
     # The gate for whether a note is written as a triplet is rhythm_inference's
     # per-beat posterior verdict (is_tuplet) - a lattice-level decision that
@@ -352,13 +651,31 @@ def build_music21_score(score: NotationScore, grid_chords: bool = True):
         return (any(n.is_tuplet for n in event)
                 or score.ratio_family in _TERNARY_RATIO_FAMILIES)
 
+    def _divisor(event: List[NotationNote]):
+        """The subdivision THIS beat was read as, if any.
+
+        Meter-independent by construction: a sextuplet is a sextuplet in 4/4
+        exactly as in 6/8, and nothing here consults the time signature. The
+        only reason tuplets ever looked like a compound-meter feature is that
+        until now the sole tuplet unit the page could write was the triplet's
+        1/3 - so on any other subdivision the note was flattened to a binary
+        value and the tuplet vanished, whatever the meter said."""
+        for n in event:
+            d = getattr(n, "tuplet_divisor", None)
+            if d:
+                return int(d)
+        return None
+
     def _make_element(event: List[NotationNote], is_drum: bool = False):
         """A Note, or a Chord when several notes were struck together.
-        Drums become Unpitched objects on the percussion staff (§XVI.10 #2)."""
-        allow = _triplet(event)
-        ql = max(_quarter_length(n.duration_ms, score.tempo_bpm, allow,
-                                 musical_time=score.musical_time,
-                                 start_ms=n.start_ms) for n in event)
+        Drums become Unpitched objects on the percussion staff (§XVI.10 #2).
+
+        Deliberately does NOT set a duration. The caller derives quarterLength
+        from the SNAPPED onset and end (grid_end - grid_onset), which is what
+        makes each voice tile its bar. This used to compute a duration here as
+        well and have it overwritten one line later - dead work that also meant
+        the rubato-aware `musical_time` path in _quarter_length never reached
+        the page (2026-08-17 audit)."""
         if is_drum:
             if len(event) == 1:
                 el = _unpitched_for(event[0].pitch)
@@ -368,13 +685,11 @@ def build_music21_score(score: NotationScore, grid_chords: bool = True):
                     el = m21perc.PercussionChord([_unpitched_for(n.pitch) for n in event])
                 except Exception:
                     el = _unpitched_for(event[0].pitch)
-            el.quarterLength = ql
             return el
         if len(event) == 1:
             el = m21note.Note(event[0].pitch)
         else:
             el = m21chord.Chord(sorted(n.pitch for n in event))
-        el.quarterLength = ql
         el.volume.velocity = max(n.velocity for n in event)
         # Ties (tie_reconstruction, via NotationNote flags): a held note that
         # tie_reconstruction joined to the next same-pitch note. start->next,
@@ -437,10 +752,9 @@ def build_music21_score(score: NotationScore, grid_chords: bool = True):
             m_part.insert(0.0, m21meter.TimeSignature(
                 f"{score.time_signature[0]}/{score.time_signature[1]}"))
             if score.key:
-                try:
-                    m_part.insert(0.0, m21key.Key(score.key.replace("m", "").strip()))
-                except Exception:
-                    pass
+                key_object = _m21_key(score.key)
+                if key_object is not None:
+                    m_part.insert(0.0, key_object)
             if part.is_drum:
                 # Percussion staff: drums are unpitched, so a pitched clef
                 # would place them at meaningless staff positions (§XVI.10 #2).
@@ -466,13 +780,15 @@ def build_music21_score(score: NotationScore, grid_chords: bool = True):
                 placed = []
                 for event in voice_events:
                     triplet = _triplet(event)
+                    divisor = _divisor(event)
                     onset = _offset_quarter_length(
                         min(n.start_ms for n in event), origin_ms, score.tempo_bpm, triplet,
-                        musical_time=score.musical_time)
+                        musical_time=score.musical_time, divisor=divisor)
                     end = _offset_quarter_length(
                         max(n.end_ms for n in event), origin_ms, score.tempo_bpm, triplet,
-                        musical_time=score.musical_time)
-                    min_grid = (1.0 / 3.0) if triplet else 0.25
+                        musical_time=score.musical_time, divisor=divisor)
+                    min_grid = (Fraction(1, divisor) if divisor
+                                else (1.0 / 3.0) if triplet else 0.25)
                     el = _make_element(event, is_drum=part.is_drum)
                     # Snap the DURATION onto the same grid as the onset, rather
                     # than just subtracting two snapped points. A difference of
@@ -485,17 +801,91 @@ def build_music21_score(score: NotationScore, grid_chords: bool = True):
                     # reconcile them either. Staying on one grid keeps every
                     # duration notatable; a slightly-wrong readable value always
                     # beats an exact un-notatable one on the page.
-                    el.quarterLength = _representable(max(min_grid, end - onset), triplet)
-                    placed.append([onset, el])
+                    _ql = _representable(max(min_grid, end - onset), triplet,
+                                         divisor=divisor)
+                    if divisor:
+                        # A tuplet occupies ONE beat and may not spill out of
+                        # it - see rhythm_inference's anchoring rule. Enforced
+                        # here as well because the legato fill and the voice
+                        # clamp can both lengthen a note after the fact. A beat
+                        # never spans a barline, so this also makes a
+                        # barline-crossing bracket impossible.
+                        _ql = _clamp_to_beat_frame(onset, _ql)
+                        if _ql <= 0:
+                            continue
+                        _ql = _apply_tuplet(el, _ql, divisor)
+                        if _ql <= 0:
+                            continue
+                    else:
+                        el.quarterLength = _ql
+                    placed.append([onset, el, triplet, divisor])
                 placed.sort(key=lambda oe: oe[0])
-                for i, (onset, el) in enumerate(placed):
+                # How far into the voice real content already reaches, so a
+                # frame-marker rest is never written over an existing note.
+                _voice_filled_to = float("-inf")
+                for i, (onset, el, triplet, divisor) in enumerate(placed):
                     if i + 1 < len(placed):
                         gap = placed[i + 1][0] - onset
+                        # Clamp THROUGH _representable, not straight to `gap`.
+                        # BUG FIX (2026-08-17 audit): assigning the raw gap
+                        # undid the snap three lines above it - a gap is the
+                        # difference of two grid points and is not itself
+                        # guaranteed notatable (1/3 + 1/4 = 0.5833), which is
+                        # exactly the leftover music21 renders as 24:13 and
+                        # MuseScore boxes in red. Round DOWN to a representable
+                        # value so the note still cannot run into the next onset.
                         if gap > 0 and el.quarterLength > gap:
-                            el.quarterLength = gap
+                            _clamped = _representable_at_most(
+                                gap, triplet, divisor=divisor)
+                            if divisor:
+                                _clamped = _clamp_to_beat_frame(onset, _clamped)
+                                if _clamped <= 0:
+                                    continue
+                                if _apply_tuplet(el, _clamped, divisor) <= 0:
+                                    continue
+                            else:
+                                el.quarterLength = _clamped
                     if el.quarterLength <= 0:
                         continue
-                    m_voice.insert(onset, el)
+
+                    # BEAT HIERARCHY (output/beat_hierarchy.py). One sounding
+                    # note becomes the tied chain the page should show, so no
+                    # un-tied duration ever hides a barline, a half-measure or
+                    # a beat the reader is looking for. Tuplets pass through
+                    # whole - they are anchored to one beat and must not be
+                    # broken. A single-element result is the common case and
+                    # costs one function call.
+                    if divisor and onset >= _voice_filled_to - 1e-9:
+                        # Hold the tuplet frame on its beat with a tuplet rest
+                        # when the first sounding slot is not slot 0.
+                        #
+                        # ONLY INTO EMPTY SPACE. The span before this onset may
+                        # already be occupied by the previous note in this
+                        # voice, and inserting a rest on top of it DOUBLE-BOOKS
+                        # the voice: measured on the Chopin page, voice 1 summed
+                        # to 5.5 quarter-lengths in a 4.0 bar while voice 2 sat
+                        # at exactly 4.0, and the overflow hanging off the end
+                        # was being reported as tuplets crossing the barline.
+                        # The rest is a frame marker, not extra time.
+                        lead = _leading_tuplet_rest(onset, divisor)
+                        if lead is not None and lead[0] >= _voice_filled_to - 1e-9:
+                            m_voice.insert(lead[0], lead[1])
+
+                    chain = split_for_hierarchy(
+                        Fraction(onset).limit_denominator(_HIERARCHY_MAX_DEN),
+                        Fraction(el.quarterLength).limit_denominator(_HIERARCHY_MAX_DEN),
+                        score.time_signature[0], score.time_signature[1],
+                        is_tuplet=bool(divisor))
+                    if len(chain) == 1:
+                        m_voice.insert(onset, el)
+                        _voice_filled_to = onset + float(el.quarterLength)
+                        continue
+                    for seg_i, (seg_start, seg_dur) in enumerate(chain):
+                        piece = copy.deepcopy(el)
+                        piece.quarterLength = seg_dur
+                        _chain_tie(piece, seg_i, len(chain))
+                        m_voice.insert(float(seg_start), piece)
+                        _voice_filled_to = float(seg_start) + float(seg_dur)
                 m_voice.makeRests(fillGaps=True, inPlace=True)
                 m_part.insert(0.0, m_voice)
 

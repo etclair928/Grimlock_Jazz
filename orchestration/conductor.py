@@ -23,7 +23,7 @@ from __future__ import annotations
 import gc
 import time
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from statistics import median
 from typing import Dict, List, Optional, Tuple, Union
@@ -41,6 +41,7 @@ from pitch_engine import (
 from instrument_attribution import resolve_instrument_identity, check_range, RANGE_ANNOTATION_KIND
 from key_intelligence import analyze_key, analyze_key_from_notes, key_fit, KEY_FIT_ANNOTATION_KIND, KeyResult
 from rhythm_engine import (
+    estimate_time_signature_with_phase, classify_drift,
     run_librosa_tempo, run_madmom_tempo, run_note_onset_tempo_witness, run_lattice_witness,
     run_pulse_field, estimate_groove, compute_phase_deltas, detect_drums,
     build_phase_locked_grid, estimate_time_signature, sample_beat_accents,
@@ -78,6 +79,30 @@ from model_registry import unload_demucs
 # and a real 60s separation produced genuine guitar/piano stems with the
 # "other" residual dropping to a fraction of its 4-stem energy. The hash
 # check stays fully enforced - nothing was bypassed.
+# METER VOTE: how confident madmom's downbeat tracker must be before its
+# reading is allowed into the vote at all.
+#
+# It is the only meter witness reporting on an absolute-ish scale - the other
+# two report a chance-corrected salience and a relative spectral power - and
+# resolve_meter SUMS them, so whichever scale runs hottest decides. MEASURED
+# across the library (tools/meter_harness.py), it answers 6 on four songs of
+# five whatever the truth is, and its mode-share term is 1.00 everywhere, so
+# that half of its confidence carries no information about correctness.
+#
+# The spacing-CV half DOES: where the witness is right it is confident (No
+# Pasaran 0.920, HRV 0.877, Hopeful 0.533) and on the one song it is badly
+# wrong it is not (Chopin 0.384, against a published edition reading 4/4).
+# A floor lets two agreeing calibrated witnesses carry a beat the trained one
+# cannot see, without touching the songs it was added to fix. Same shape as
+# OCTAVE_ARBITER_MIN_CONFIDENCE, and for the same reason.
+#
+# HONEST ABOUT THE NUMBER: 0.50 is a round value in the single gap between
+# 0.384 and 0.533 in a four-song sample. The RULE is principled; the threshold
+# is calibrated on very little and should be revisited as the library grows.
+# Scored under §XVII.3's metrical-equivalence rule (6/4 is two 3/4 bars), this
+# takes meter from 3/4 songs correct to 4/4.
+METER_DOWNBEAT_MIN_CONFIDENCE = 0.50
+
 DEFAULT_SEPARATION_MODEL = "htdemucs_6s"
 DURATION_ANNOTATION_KIND = "duration_hypothesis"
 
@@ -427,6 +452,10 @@ def transcribe_file(
     onset_candidates = detect_onset_candidates(engine, master_track)
     duration_ms = master_track.duration_seconds * 1000.0
 
+    # Which tracked beat carries beat 1. Stays 0 unless the meter estimator
+    # finds significant evidence otherwise (guided mode never estimates it).
+    onset_downbeat_phase = 0
+
     if guided_tempo_bpm is not None:
         # §2.7 "guided means guided": guided mode does NOT run the tempo
         # witnesses at all. The user supplied the tempo, so the pipeline
@@ -540,22 +569,55 @@ def transcribe_file(
             reversible=False,
         )
     else:
-        # ONE canonical beat grid anchored to the RESOLVED tempo, not each
-        # witness's own independently-tracked grid - each witness's own
-        # tempo error accumulates into phase drift fast enough to corrupt
-        # exactly the longer bar lengths (6/4 in particular) a meter test
-        # cares about most (see meter.py's module docstring for the math).
-        phase_locked_grid = build_phase_locked_grid(
-            tempo_resolution.tempo_meter.tempo_bpm,
-            onset_candidates.combined_ms,
-            duration_ms,
-        )
+        # THE GRID THE METER TEST IS SAMPLED ON (fixed 2026-08-17, Chopin).
+        #
+        # meter.py's fix 1 replaced "each witness's own grid" with ONE grid
+        # anchored to the resolved tempo, because a witness's own TEMPO ERROR
+        # accumulates into phase drift. That reasoning is right about an
+        # EXTRAPOLATED grid and wrong about a TRACKED one: the anchor witness's
+        # beat_times_ms are tracked per beat by madmom's DBN, so they do not
+        # accumulate anything - whereas rebuilding an isochronous grid from a
+        # single scalar tempo throws away every bit of rubato the tracker found.
+        #
+        # MEASURED on Rubinstein's Op.62/1 (beat CV 0.168, local tempo 63-102):
+        #   * the isochronous grid sits a median 194ms - and up to 394ms - from
+        #     the real beats, with 48% of them more than 200ms away;
+        #   * sampled on it, NO meter candidate is significant at all and 4/4
+        #     collapses to score 0.0217, so the estimator returns its
+        #     (4, 4, 0.3) fallback and gets outvoted;
+        #   * sampled on the TRACKED beats the same estimator returns 4/4 at
+        #     score 0.1592, significant, phase 0 - which is what the published
+        #     edition says.
+        # The pipeline resolved 6/4 on a piece in 4/4 purely because the accent
+        # test was reading a grid this project already documents as wrong
+        # (core/musical_time.py's header measures the same drift).
+        #
+        # So: sample on the tracked beats when we have them, and fall back to
+        # the isochronous reconstruction only when we do not.
+        tracked_beats = list(tempo_resolution.tempo_meter.beat_times_ms or ())
+        if len(tracked_beats) >= 8:
+            meter_grid = tracked_beats
+            meter_grid_kind = "tracked beats"
+        else:
+            meter_grid = list(build_phase_locked_grid(
+                tempo_resolution.tempo_meter.tempo_bpm,
+                onset_candidates.combined_ms,
+                duration_ms,
+            ))
+            meter_grid_kind = "isochronous phase-locked grid (no tracked beats)"
+
+        # Still needed by the guided-grid path and as a phase reference.
+        phase_locked_grid = meter_grid
 
         meter_candidates = []
         if phase_locked_grid:
-            meter_candidates.append(
-                estimate_time_signature(engine, master_track, phase_locked_grid, ratio_family=ratio_family)
-            )
+            # ...and its DOWNBEAT PHASE, which this estimator has always
+            # computed and always discarded (2026-08-17 audit). Without it
+            # nothing in the pipeline knows which beat is beat 1, so the
+            # notation layers each picked their own barline origin.
+            ts_num, ts_den, ts_conf, onset_downbeat_phase = estimate_time_signature_with_phase(
+                engine, master_track, phase_locked_grid, ratio_family=ratio_family)
+            meter_candidates.append((ts_num, ts_den, ts_conf))
             # Independent second method against the SAME grid: spectral
             # periodicity of the beat-accent sequence itself, rather than
             # only the downbeat-salience heuristic - genuine corroboration,
@@ -581,7 +643,8 @@ def transcribe_file(
         # run it here if it wasn't (i.e. tempo was guided so that block was skipped).
         if downbeat_witness is None:
             downbeat_witness = run_madmom_downbeat(engine, master_track)
-        if downbeat_witness is not None:
+        if (downbeat_witness is not None
+                and downbeat_witness.confidence >= METER_DOWNBEAT_MIN_CONFIDENCE):
             meter_candidates.append((
                 downbeat_witness.beats_per_bar,
                 resolve_denominator(downbeat_witness.beats_per_bar, ratio_family),
@@ -599,10 +662,106 @@ def transcribe_file(
                           "felt downbeats.",
                 reversible=False,
             )
+        elif downbeat_witness is not None:
+            music_box.log_decision(
+                stage_name="rhythm_engine", decision_type="downbeat_witness_excluded",
+                before_state={"confidence": round(downbeat_witness.confidence, 3),
+                              "floor": METER_DOWNBEAT_MIN_CONFIDENCE},
+                after_state={"beats_per_bar": downbeat_witness.beats_per_bar,
+                             "voted": False},
+                reasoning="The downbeat tracker is not confident enough to outvote the "
+                          "onset-accent and spectral-periodicity witnesses, which report "
+                          "on calibrated scales. Its reading is recorded and discarded.",
+                reversible=True,
+            )
 
         if not meter_candidates:
             meter_candidates.append((4, 4, 0.3))
         meter_resolution = resolve_meter(meter_candidates)
+        music_box.log_decision(
+            stage_name="rhythm_engine", decision_type="meter_grid",
+            before_state={"grid": meter_grid_kind, "beats": len(meter_grid)},
+            after_state={"candidates": meter_candidates,
+                         "resolved": f"{meter_resolution.numerator}/{meter_resolution.denominator}"},
+            reasoning="Which beat grid the downbeat-accent test was sampled on. An "
+                      "isochronous reconstruction of a rubato performance sits ~200ms "
+                      "off the real beats and flattens every candidate's salience, so "
+                      "the tracked beats are used whenever they exist.",
+            reversible=True,
+        )
+
+    # THE RESOLVED METER GOES BACK INTO THE TEMPO METER, and everything
+    # downstream reads it from there (2026-08-17 audit).
+    #
+    # resolve_tempo takes `time_signature` as a parameter and the Conductor
+    # cannot supply it - meter is resolved forty lines later than tempo. So the
+    # TempoMeter carried resolve_tempo's DEFAULT 4/4 for the whole rest of the
+    # run, and meter_resolution was used only to stamp the MIDI/MusicXML
+    # header. Everything that consumes tempo_meter therefore believed 4/4:
+    #   * build_lattice's compound-meter test (6/8, 9/8, 12/8 -> 3 subdivisions
+    #     per beat instead of 4) could never fire;
+    #   * notation_quantizer._subdivisions_per_beat, same test, same result;
+    #   * build_trouble_map bucketed notes into 4-beat bars regardless.
+    # Two whole branches written specifically for compound meter were
+    # unreachable in detected mode. Guided mode was always correct - it builds
+    # its TempoMeter with the user's meter directly - which is exactly why this
+    # stayed invisible. One fact, one home (§9).
+    #
+    # The DOWNBEAT PHASE rides along with it. Three separate places computed a
+    # downbeat and none of them reached the page: estimate_time_signature threw
+    # its phase away, madmom's tracked downbeats stopped at the octave arbiter,
+    # and detect_pickup was never called at all. So the notation layers each
+    # invented a barline origin - the MusicXML exporter used the earliest note
+    # in the score, piano_reduction used absolute zero - and neither is beat 1.
+    # Preference order: madmom's trained tracker (it reads harmony-felt
+    # downbeats the accent test is blind to), then the accent phase, then beat 0.
+    resolved_beats = tempo_resolution.tempo_meter.beat_times_ms
+    resolved_downbeats = tempo_resolution.tempo_meter.downbeat_times_ms
+    if not resolved_downbeats and resolved_beats:
+        phase = onset_downbeat_phase if onset_downbeat_phase < len(resolved_beats) else 0
+        resolved_downbeats = tuple(
+            resolved_beats[i] for i in range(phase, len(resolved_beats), meter_resolution.numerator)
+        )
+    tempo_resolution = TempoResolution(
+        tempo_meter=replace(
+            tempo_resolution.tempo_meter,
+            time_signature_numerator=meter_resolution.numerator,
+            time_signature_denominator=meter_resolution.denominator,
+            downbeat_times_ms=resolved_downbeats,
+        ),
+        contention=tempo_resolution.contention,
+    )
+    music_box.log_decision(
+        stage_name="rhythm_engine", decision_type="downbeat_phase",
+        before_state={"beats": len(resolved_beats)},
+        after_state={"downbeats": len(resolved_downbeats),
+                     "phase_beat_index": onset_downbeat_phase,
+                     "bar_origin_ms": round(resolved_downbeats[0], 1) if resolved_downbeats else None},
+        reasoning="Which tracked beat is beat 1. Previously computed in three "
+                  "places and consumed in none, so every barline downstream was "
+                  "anchored to an arbitrary origin.",
+        reversible=True,
+    )
+
+    # Tempo DRIFT (evidence only). MusicalTime's whole thesis is that a
+    # performer is not a metronome; classify_drift is the module that says HOW
+    # the tempo moves - accelerando, ritardando, a step change, a shift into
+    # double time - and it was written, exported, and called from nowhere
+    # (2026-08-17 audit). Logged as a finding, not acted on: nothing consumes a
+    # drift verdict yet, and the map itself already follows the tracked beats.
+    # Conservative by construction (burden of proof is on "the tempo moved").
+    drift = classify_drift(engine, master_track, tempo_resolution.tempo_meter.tempo_bpm)
+    music_box.log_decision(
+        stage_name="rhythm_engine", decision_type="tempo_drift",
+        before_state={"reference_bpm": round(tempo_resolution.tempo_meter.tempo_bpm, 1)},
+        after_state={"kind": drift.kind.value, "span_bpm": round(drift.span_bpm, 1),
+                     "confidence": round(drift.confidence, 2), "detail": drift.detail},
+        reasoning=f"Tempo reads {drift.kind.value} over the track "
+                  f"({drift.span_bpm:.1f} BPM span, confidence {drift.confidence:.2f}). "
+                  f"Evidence only - the notation clock already follows the tracked "
+                  f"beats via MusicalTime.",
+        reversible=True,
+    )
 
     swing_ratio, groove_confidence = estimate_groove(engine, master_track, tempo_resolution.tempo_meter.beat_times_ms)
 
@@ -662,6 +821,28 @@ def transcribe_file(
         reversible=False,
     )
 
+    # THE MAP between clock time and musical position (core/musical_time.py).
+    # Built ONCE from the tracked beats and handed to EVERY stage that converts
+    # between the two, so there is one currency instead of each site dividing
+    # by 60000/bpm on its own. Measured: converting only the quantizer moved
+    # Chopin recall +9.6% because the exporter's own conversions silently
+    # reverted it - a partial conversion is worth nothing.
+    #
+    # Built HERE, before quantization, rather than after it (2026-08-17 audit):
+    # it used to be constructed 250 lines further down, which is why the
+    # lattice judge and the rhythm inference - the two stages that most need it
+    # - were the two that never got it.
+    musical_time = MusicalTime.from_beats(
+        tempo_resolution.tempo_meter.beat_times_ms,
+        fallback_beat_ms=tempo_resolution.tempo_meter.beat_duration_ms)
+    music_box.log_decision(
+        stage_name="quantization", decision_type="musical_time",
+        before_state={"tempo_bpm": tempo_resolution.tempo_meter.tempo_bpm},
+        after_state={"tracked_beats": len(musical_time.beats_ms),
+                     "usable": bool(musical_time.usable),
+                     "summary_bpm": round(musical_time.summary_bpm(), 2)},
+        reasoning="beat-space map for notation timing", reversible=True)
+
     # Quantization: per-note snap proposal + duration hypothesis, written
     # as Annotations - Note.start_ms/end_ms are never touched (§2's
     # frozen-detection-floor law holds by construction here).
@@ -671,6 +852,7 @@ def transcribe_file(
         groove_confidence=groove_confidence,
         lattice_confidence=lattice.confidence if lattice is not None else 0.0,
         phase_delta_ms=phase_delta_result.average_ms,
+        musical_time=musical_time,
     )
     beat_ms = tempo_resolution.tempo_meter.beat_duration_ms
 
@@ -689,7 +871,8 @@ def transcribe_file(
         _notes_by_stem_for_rhythm[note.stem].append(note)
     for stem_notes in _notes_by_stem_for_rhythm.values():
         inferred_rhythm.update(
-            infer_voice_rhythm(stem_notes, beat_ms, grid_origin_ms, swing_ratio=swing_ratio)
+            infer_voice_rhythm(stem_notes, beat_ms, grid_origin_ms, swing_ratio=swing_ratio,
+                               musical_time=musical_time)
         )
     rhythm_inferred_count = 0
 
@@ -752,7 +935,8 @@ def transcribe_file(
             ))
             rhythm_inferred_count += 1
         else:
-            notation = notation_quantize_note(note, tempo_resolution.tempo_meter, duration_testimony)
+            notation = notation_quantize_note(note, tempo_resolution.tempo_meter, duration_testimony,
+                                              musical_time=musical_time)
             if notation is not None:
                 annotations.add(Annotation(
                     note_id=note.id, kind=NOTATION_TIMING_ANNOTATION_KIND,
@@ -974,23 +1158,7 @@ def transcribe_file(
     # ensemble at once (unlike TieReconstruction, which stays within one
     # voice) - flags measures that are low-confidence and/or fragmented.
     # Read-only reporting on MusicalFindingsMap; nothing acts on it.
-    # THE MAP between clock time and musical position (core/musical_time.py).
-    # Built ONCE from the tracked beats and handed to the notation view, so
-    # every clock<->musical conversion goes through one object instead of
-    # dividing by 60000/bpm in three separate places. Measured: converting
-    # only the quantizer moved Chopin recall +9.6% because the exporter's two
-    # conversions silently reverted it.
-    musical_time = MusicalTime.from_beats(
-        tempo_resolution.tempo_meter.beat_times_ms,
-        fallback_beat_ms=tempo_resolution.tempo_meter.beat_duration_ms)
-    music_box.log_decision(
-        stage_name="quantization", decision_type="musical_time",
-        before_state={"tempo_bpm": tempo_resolution.tempo_meter.tempo_bpm},
-        after_state={"tracked_beats": len(musical_time.beats_ms),
-                     "usable": bool(musical_time.usable),
-                     "summary_bpm": round(musical_time.summary_bpm(), 2)},
-        reasoning="beat-space map for notation timing", reversible=True)
-
+    # (`musical_time` is built once, up with the quantizer that needs it.)
     findings.trouble_measures = build_trouble_map(pitched_notes, tempo_resolution.tempo_meter)
     music_box.log_decision(
         stage_name="quantization", decision_type="trouble_map",
@@ -1126,6 +1294,10 @@ def transcribe_file(
     # separation improves.
     if output_musicxml_path is not None:
         from output.musicxml_exporter import export_musicxml
+        # Bar 1 starts on the resolved downbeat (see the downbeat_phase block
+        # above), not wherever the earliest note happens to be.
+        _downbeats = tempo_resolution.tempo_meter.downbeat_times_ms
+        bar_origin_ms = _downbeats[0] if _downbeats else None
         if routed_layout:
             # Per-stem staff routing (user directive 2026-07-31): each stem its
             # own staff; a GRAND STAFF only where earned (guitar/piano/harp
@@ -1141,6 +1313,7 @@ def transcribe_file(
                 key=findings.key, use_consolidation=True, ratio_family=ratio_family,
                 honor_university=uni_mode.applies,
                 musical_time=musical_time,
+                bar_origin_ms=bar_origin_ms,
             )
             layout_desc = ("per-stem routed (grand staff where earned)"
                            + (" + university APPLY" if uni_mode.applies else ""))
@@ -1152,6 +1325,8 @@ def transcribe_file(
                 time_signature=(meter_resolution.numerator, meter_resolution.denominator),
                 key=findings.key, use_voices=False, use_consolidation=True,
                 ratio_family=ratio_family,
+                musical_time=musical_time,
+                bar_origin_ms=bar_origin_ms,
             )
             layout_desc = "one staff per family"
         export_musicxml(notation_score, str(output_musicxml_path))

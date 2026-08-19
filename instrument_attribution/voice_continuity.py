@@ -55,22 +55,37 @@ def stream_into_lines(notes: List[Note]) -> List[VoiceLine]:
     or starts a new line if no open line can take it under
     MAX_ASSIGNMENT_COST / MAX_GAP_MS."""
     lines: List[VoiceLine] = []
+    # Lines that can still take a note. A line whose last note ended more than
+    # MAX_GAP_MS ago can never be chosen again (notes arrive in time order), so
+    # RETIRE it instead of re-testing it for every remaining note. The old loop
+    # scanned every line ever opened - with the ~177-line floor this greedy
+    # streamer hits on real polyphony, that is a large constant on top of an
+    # O(n x lines) walk, for candidates that were rejected by the first `if`
+    # every single time (2026-08-17 audit). Same output, by construction: the
+    # retired lines are exactly the ones the guard already skipped.
+    open_lines: List[VoiceLine] = []
+
     for note in sorted(notes, key=lambda n: n.start_ms):
+        still_open: List[VoiceLine] = []
         best_line: Optional[VoiceLine] = None
         best_cost = float("inf")
 
-        for line in lines:
+        for line in open_lines:
             if note.start_ms - line.last_note.end_ms > MAX_GAP_MS:
-                continue  # line has gone cold - don't consider it (also a cheap prune)
+                continue  # gone cold - drop it from the active set for good
+            still_open.append(line)
             cost = _assignment_cost(line, note)
             if cost is not None and cost < best_cost:
                 best_cost = cost
                 best_line = line
+        open_lines = still_open
 
         if best_line is not None and best_cost <= MAX_ASSIGNMENT_COST:
             best_line.notes.append(note)
         else:
-            lines.append(VoiceLine(line_id=uuid4().hex, notes=[note]))
+            new_line = VoiceLine(line_id=uuid4().hex, notes=[note])
+            lines.append(new_line)
+            open_lines.append(new_line)
 
     return lines
 

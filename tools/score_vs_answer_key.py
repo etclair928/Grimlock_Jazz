@@ -166,6 +166,65 @@ def dtw_path(A: np.ndarray, B: np.ndarray, open_end: bool = False):
     return path[::-1], D[end_i, end_j] / max(len(path), 1)
 
 
+# =====================================================================
+# CONTINUOUS TIMING METRICS - no threshold, no cliff
+# =====================================================================
+# WHY. A hard tolerance turns one number into two stories: on Chopin the same
+# transcription scored recall 0.645 at tau=0.25s and 0.903 at tau=0.75s. Every
+# conclusion drawn from a single tau is really a conclusion about tau. Worse,
+# the cliff hides its own cause - the tool's DTW step was 0.20s while it graded
+# at 0.25s, so a quarter of the "error" was the ruler.
+#
+# THE KERNEL IS SCORED OVER EVERY REFERENCE NOTE, NOT OVER MATCHED PAIRS.
+# Scoring only matched pairs smuggles the threshold back in: you need a
+# tolerance to decide what "matched" means, and the resulting average is
+# conditioned on it. Here each reference note contributes exp(-dt^2/2s^2) for
+# its nearest same-pitch candidate, and 0 when there is none at all - so a
+# missed note costs a real zero and the statistic is a soft RECALL that no
+# threshold touches.
+
+def gaussian_timing_score(reference_times, ours_by_pitch, sigma=0.100,
+                          search_cap=2.0):
+    """Soft recall in [0,1]: 1.0 only if every reference note has a same-pitch
+    neighbour at exactly its time. `sigma` sets how fast credit decays - it is a
+    RULER, not a tolerance, and nothing is ever excluded by it."""
+    import math
+    total = 0.0
+    errors = []
+    used = set()
+    for t, pitch in reference_times:
+        best, bd = None, search_cap
+        for st, idx in ours_by_pitch.get(pitch, ()):
+            if idx in used:
+                continue
+            if abs(st - t) < bd:
+                best, bd = idx, abs(st - t)
+        if best is None:
+            continue                      # contributes 0.0
+        used.add(best)
+        errors.append(bd)
+        total += math.exp(-(bd ** 2) / (2.0 * sigma ** 2))
+    return total / max(len(reference_times), 1), errors
+
+
+def timing_moments(errors_signed):
+    """delta (bias) and sigma (spread) in ms, plus the ratio that decides
+    whether calibrating the bias is worth anything: below ~1 the error is
+    variance-dominated and removing delta buys almost nothing."""
+    import math
+    if not errors_signed:
+        return {"delta_ms": float("nan"), "sigma_ms": float("nan"),
+                "rmse_ms": float("nan"), "delta_over_sigma": float("nan")}
+    n = len(errors_signed)
+    mean = sum(errors_signed) / n
+    var = sum((e - mean) ** 2 for e in errors_signed) / n
+    sigma = math.sqrt(var)
+    rmse = math.sqrt(sum(e * e for e in errors_signed) / n)
+    return {"delta_ms": mean * 1000.0, "sigma_ms": sigma * 1000.0,
+            "rmse_ms": rmse * 1000.0,
+            "delta_over_sigma": (abs(mean) / sigma) if sigma > 0 else float("inf")}
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("ours")
@@ -173,8 +232,21 @@ def main() -> None:
     ap.add_argument("--audio-seconds", type=float, default=180.0)
     # Alignment resolution. At 300 steps over a 180s excerpt each step is 0.6s -
     # COARSER than the +/-0.35s tolerance we grade at, so that column was partly
-    # measuring this tool rather than the transcription. 900 gives 0.2s.
-    ap.add_argument("--steps", type=int, default=900)
+    # measuring this tool rather than the transcription. 900 gives 0.2s, which
+    # is STILL coarser than the 0.25s we grade at.
+    #
+    # MEASURED on Chopin (2026-08-19), sweeping this parameter alone with the
+    # transcription held fixed:
+    #     steps   s/step   timing sigma   within 0.25s
+    #       450    0.397        0.315s        59.8%
+    #       900    0.199        0.265s        69.2%
+    #      1800    0.099        0.226s        79.1%
+    #      3600    0.050        0.216s        80.8%
+    # A third of the apparent error was this tool's own resolution, and 11
+    # points of "recall" were recovered by measuring more carefully rather than
+    # by transcribing better. It plateaus by 1800, so that is the default; the
+    # residual ~0.216s is real and ours.
+    ap.add_argument("--steps", type=int, default=1800)
     ap.add_argument("--onset-tol", type=float, default=0.25,
                     help="onset tolerance as a FRACTION of the local step")
     args = ap.parse_args()
@@ -252,6 +324,34 @@ def main() -> None:
     print(f"  recall    {rec:.3f}   (of the edition's notes, how many we found)")
     print(f"  precision {prec:.3f}   (of our notes, how many the edition has)")
     print(f"  F1        {f1:.3f}")
+
+    # ---- threshold-free view of the same data --------------------------
+    ref_times = [(key_q_to_sec(s0), p) for s0, _e0, p in in_range]
+    soft, abs_errs = gaussian_timing_score(ref_times, by_pitch)
+    signed = []
+    used2 = set()
+    for t, pitch in ref_times:
+        best, bd = None, 2.0
+        for st, idx in by_pitch.get(pitch, ()):
+            if idx in used2:
+                continue
+            if abs(st - t) < bd:
+                best, bd = idx, abs(st - t)
+        if best is not None:
+            used2.add(best)
+            signed.append(ours[best][0] - t)
+    m = timing_moments(signed)
+    step_s = ours_end / max(args.steps, 1)
+    print(f"\n=== CONTINUOUS TIMING (no threshold) ===")
+    print(f"  alignment resolution      {step_s*1000:6.1f} ms/step "
+          f"({'FINER' if step_s < tol else 'COARSER'} than the {tol:.2f}s tolerance above)")
+    print(f"  soft recall (gaussian)    {soft:.3f}   sigma=100ms, scored over every "
+          f"reference note")
+    print(f"  RMSE                      {m['rmse_ms']:6.1f} ms")
+    print(f"  bias  delta               {m['delta_ms']:+6.1f} ms")
+    print(f"  spread sigma              {m['sigma_ms']:6.1f} ms")
+    print(f"  delta/sigma               {m['delta_over_sigma']:.3f}   "
+          f"({'BIAS-dominated: calibration would pay' if m['delta_over_sigma'] > 1.0 else 'VARIANCE-dominated: calibrating the bias buys ~nothing'})")
     print("\n  NB precision is depressed by anything Rubinstein plays that the")
     print("  edition does not notate (rolled chords, pedal resonance) and by our")
     print("  own extra octaves. Recall is the cleaner number.")

@@ -24,7 +24,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from fractions import Fraction
+from typing import List, Optional, Tuple
 
 from core import Note
 
@@ -47,6 +48,78 @@ TUPLET_RATIOS = {
     "compound_triplet": 3.0 / 4.0,
 }
 DEFAULT_TOLERANCE_FRACTION = 0.08  # 8% of the beat
+
+# THE ONE TABLE OF DURATIONS A NOTEHEAD CAN ACTUALLY BE WRITTEN AS, in beats.
+#
+# Snapping to a GRID is not enough: a k/3 triplet grid happily produces 5/3 and
+# 7/3, which no note value represents, so music21 invents ratios like 24:13 and
+# 12:7 to make the arithmetic work and MuseScore boxes the measure in red
+# because it cannot reconcile them either. Snapping to this explicit SET makes
+# every emitted duration notatable by construction.
+#
+# This lives HERE, not in the exporter, because two layers need it and the
+# exporter is downstream of quantization - it had its own private copy of the
+# same numbers, which is exactly the duplicated-fact disease §9 exists to
+# remove. output/musicxml_exporter.py imports these.
+NOTATABLE_BEAT_VALUES: Tuple[float, ...] = (
+    0.125, 0.25, 0.375, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0,
+)
+NOTATABLE_TUPLET_BEAT_VALUES: Tuple[float, ...] = (
+    1.0 / 3.0, 2.0 / 3.0, 4.0 / 3.0, 8.0 / 3.0,
+)
+
+
+def tuplet_unit_values(divisor: int, max_units: Optional[int] = None) -> Tuple[Fraction, ...]:
+    """Every duration a note inside a `divisor`-tuplet can take, as EXACT
+    fractions of a beat: 1/d, 2/d, ... up to a beat and a bit beyond for a
+    tuplet note tied over.
+
+    EXACT, not float. A sextuplet unit is 1/6 = 0.1666666666666..., and once a
+    handful of those are added up the result is not any rational music21
+    recognises - which is where ratios like 24:13 and 48:43 come from. They are
+    not tuplets anyone detected; they are music21 reconciling accumulated
+    binary-float error. Fractions remove the error at the source."""
+    if divisor < 1:
+        return ()
+    top = max_units if max_units is not None else divisor * 2
+    return tuple(Fraction(k, divisor) for k in range(1, top + 1))
+
+
+def notatable_values(allow_tuplet: bool = False,
+                     divisor: Optional[int] = None) -> Tuple[float, ...]:
+    """The permitted duration vocabulary, in beats.
+
+    `divisor` is the subdivision the BEAT was read as (rhythm_inference's
+    per-beat verdict): pass 6 and a sextuplet's 1/6 becomes writable. Without
+    it the old behaviour holds - binary, plus the four triplet values when
+    `allow_tuplet` is set - which is what silently flattened every non-triplet
+    tuplet to a binary value: 1/6 to 1/8, 1/5 to 1/4, 1/12 to 1/8. The model
+    could find a sextuplet; the page had no way to write one down.
+
+    A tuplet WIDENS the set, it never replaces the binary one: a beat read as a
+    sextuplet can still contain a note lasting half the beat."""
+    if divisor:
+        return NOTATABLE_BEAT_VALUES + tuple(float(f) for f in tuplet_unit_values(divisor))
+    return NOTATABLE_BEAT_VALUES + (NOTATABLE_TUPLET_BEAT_VALUES if allow_tuplet else ())
+
+
+def nearest_notatable(beats: float, allow_tuplet: bool = False,
+                      divisor: Optional[int] = None) -> float:
+    """Nearest duration a notehead can be written as."""
+    return min(notatable_values(allow_tuplet, divisor), key=lambda v: abs(v - beats))
+
+
+def notatable_at_most(beats: float, allow_tuplet: bool = False,
+                      divisor: Optional[int] = None) -> float:
+    """Largest notatable duration that does NOT exceed `beats`. For the callers
+    that are enforcing a ceiling (a note may not run into the next onset in its
+    own monophonic voice), where rounding to the NEAREST value could round up
+    and reintroduce the overlap the ceiling exists to prevent. Returns the
+    smallest notatable value when `beats` is below all of them; callers are
+    expected to drop durations they consider too short."""
+    allowed = notatable_values(allow_tuplet, divisor)
+    fitting = [v for v in allowed if v <= beats + 1e-9]
+    return max(fitting) if fitting else min(allowed)
 
 
 @dataclass(frozen=True)
@@ -111,4 +184,4 @@ def infer_duration(note: Note, beat_ms: float, tolerance_fraction: float = DEFAU
     return DurationTestimony(note_id=note.id, raw_duration_ms=raw_dur, hypotheses=hypotheses)
 
 
-__all__ = ["DurationHypothesis", "DurationTestimony", "infer_duration", "SYMBOLIC_DURATIONS", "TUPLET_RATIOS"]
+__all__ = ["tuplet_unit_values", "DurationHypothesis", "DurationTestimony", "infer_duration", "SYMBOLIC_DURATIONS", "TUPLET_RATIOS"]

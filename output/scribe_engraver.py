@@ -50,24 +50,55 @@ MIDI_RESOLUTION_PPQN = 480
 MIDI_TEMPO_MAP_MERGE_TOLERANCE_BPM = 1.5
 
 # Audio before the first tracked beat shorter than this is treated as
-# zero (beat 0 sits at tick 0, everything shifts earlier by < 50ms);
-# longer intros get a real pre-beat segment so beat 0 still lands on an
-# exact beat boundary in ticks.
+# zero - the offset is too small to be worth a segment or a shift.
 _PRE_BEAT_MIN_OFFSET_S = 0.050
 
 
 def _build_beat_tick_scales(
         beat_times_ms: Sequence[float], resolution: int,
-) -> Optional[Tuple[List[Tuple[int, float]], int]]:
+) -> Optional[Tuple[List[Tuple[int, float]], int, float]]:
     """Turns the pipeline's TRACKED beat grid into a pretty_midi tick-scale
     list [(tick, seconds_per_tick), ...] that pins beat i to tick
     T0 + i*resolution. This is the structural binding raw export lacks:
     with it, a note's tick position is defined RELATIVE to where the beats
     actually fell in the performance, so a notation host draws it on the
     right beat instead of re-deriving its own grid from free-floating
-    absolute times. Absolute note times are unchanged - only the tick
-    lattice underneath them moves. Returns (tick_scales, beat0_tick), or
-    None when the grid is unusable (too few beats / non-monotonic)."""
+    absolute times. Returns (tick_scales, beat0_tick, pad_s), or None when
+    the grid is unusable (too few beats / non-monotonic).
+
+    THE PICKUP, AND WHY IT NEEDS A `pad_s` (2026-08-17 audit).
+
+    Beat 0 must sit at a tick that is a whole multiple of `resolution`, or
+    every beat after it inherits the remainder and the whole point of this
+    function is lost. The intro before beat 0 therefore has to occupy a whole
+    number of grid beats. Forcing a SHORT pickup into one beat (the original
+    `max(1, ...)`) crams e.g. 175ms into 480 ticks and fabricates a 343 BPM
+    leading event, which made MuseScore mis-read the file's tempo - a real
+    reported bug. The fix for THAT was to fall back to `beat0_tick = 0`.
+
+    But tick 0 is time 0 by definition, so that fallback did not do what its
+    comment claimed. It did not make "the short anacrusis fall early in bar 1"
+    - it put beat 0 at a fractional tick (175ms at 120bpm = tick 168 of a
+    480-tick beat) and displaced EVERY BEAT IN THE FILE by that amount. The
+    dead zone was 50ms < pickup < half a beat, which is an extremely ordinary
+    place for a first tracked beat to fall.
+
+    Three cases now, and all three land beat 0 on an exact beat tick:
+      * pickup >= ~1 beat  - a real anacrusis. It gets that many beats at its
+        own implied rate, which is within a factor of ~2 of the real tempo.
+        Unchanged, and it was always correct. pad_s = 0.
+      * pickup in the dead zone (50ms .. half a beat) - PADDED OUT to one beat
+        at the first real beat's own tempo (so no fabricated 343 BPM event),
+        with the caller shifting every note LATER by pad_s to match. The file
+        then starts up to a beat after the source audio, which is the cheaper
+        thing to give up: correct barring is what this function exists for.
+      * pickup < 50ms - a rounding artifact, pulled to zero by shifting
+        everything EARLIER by that much. This is what the old code's comment
+        claimed to do and never did.
+
+    `pad_s` is what the caller must add to every note's time. It is positive
+    in the padded case and slightly negative in the last one, where the caller
+    clamps at zero (nothing musical lives in the first 50ms)."""
     beats_s = [b / 1000.0 for b in beat_times_ms]
     if len(beats_s) < 2:
         return None
@@ -77,26 +108,34 @@ def _build_beat_tick_scales(
 
     scales: List[Tuple[int, float]] = []
 
-    # Pre-beat segment: the intro before beat 0 occupies a whole number of
-    # grid beats (>=1) so beat 0 itself lands on an exact beat tick.
-    #
-    # CRITICAL: only build this segment when the pickup rounds to a WHOLE
-    # beat. Forcing a sub-beat lead-in into one beat (the old max(1, ...))
-    # crams e.g. a 175ms phase offset into a full 480-tick beat and thereby
-    # fabricates an absurd intro tempo - a real case produced a 343 BPM
-    # leading event that made MuseScore mis-read the whole file's tempo.
-    # When the pickup is less than half a beat, anchor beat 0 at tick 0
-    # instead; the short anacrusis simply falls early in bar 1, and the
-    # tempo map stays honest (one rate, no phantom segment).
     first_spb = intervals[0]
     beat0_s = beats_s[0]
-    n_pickup_beats = int(round(beat0_s / first_spb)) if (
-        beat0_s >= _PRE_BEAT_MIN_OFFSET_S and first_spb > 0) else 0
+    pad_s = 0.0
+    n_pickup_beats = int(round(beat0_s / first_spb)) if first_spb > 0 else 0
+
     if n_pickup_beats >= 1:
+        # A lead-in of about a whole beat or more. Give it that many beats at
+        # its own implied rate - within a factor of ~2 of the real tempo, which
+        # is an honest reading of a real anacrusis. No shift needed.
         beat0_tick = n_pickup_beats * resolution
         scales.append((0, beat0_s / beat0_tick))
+    elif beat0_s >= _PRE_BEAT_MIN_OFFSET_S:
+        # THE DEAD ZONE: too long to ignore, too short to be a beat. Pad it out
+        # to one beat at the first real beat's own tempo, and tell the caller to
+        # shift every note by the same amount. This is the case the old code got
+        # wrong - it anchored beat 0 at tick 0 without moving anything, which
+        # silently displaced every beat in the file by up to half a beat.
+        pad_s = first_spb - beat0_s
+        beat0_tick = resolution
+        scales.append((0, first_spb / beat0_tick))
+        beats_s = [b + pad_s for b in beats_s]
     else:
+        # Below the threshold the offset is a rounding artifact. Pull it to zero
+        # (shifting everything EARLIER by <50ms) so beat 0 really does sit on
+        # tick 0 - which is what this branch always claimed to do.
+        pad_s = -beat0_s
         beat0_tick = 0
+        beats_s = [b + pad_s for b in beats_s]
 
     # Merge per-beat intervals into tempo segments (see tolerance above).
     segments: List[Tuple[int, int]] = []  # (first_interval_idx, last_interval_idx)
@@ -116,7 +155,7 @@ def _build_beat_tick_scales(
         duration_s = beats_s[last + 1] - beats_s[first]
         scales.append((start_tick, duration_s / (n_beats * resolution)))
 
-    return scales, beat0_tick
+    return scales, beat0_tick, pad_s
 
 # key string (e.g. "C", "Bm") -> pretty_midi key_number (0-11 major C..B,
 # 12-23 minor c..b - the SMF/pretty_midi convention). Built from the same
@@ -242,6 +281,38 @@ def _timing_for_note(
     return start_ms, end_ms
 
 
+def _consolidated_end_ms(
+        note: Note, annotations: AnnotationStore, consolidation: dict, end_ms: float,
+        use_quantized_timing: bool, use_notation_timing: bool,
+) -> float:
+    """End of a consolidated run, ON THE TIMELINE BEING EXPORTED.
+
+    The consolidation annotation records the run's end as a RAW performance
+    millisecond, because that is the only timeline that exists when it runs.
+    Taking `max(end_ms, that_raw_value)` therefore pasted a raw end onto a
+    snapped start whenever a non-raw timeline was selected - so under
+    notation timing every merged run's primary got a duration off the grid,
+    which is exactly the kind of leftover that makes a measure un-notatable
+    (2026-08-17 audit).
+
+    The run's own last fragment already carries its end on every timeline, so
+    ask IT rather than converting. Falls back to the raw value when the
+    absorbed fragment can't be found (nothing else knows the answer)."""
+    raw_end = consolidation.get("end_ms", end_ms)
+    if not (use_quantized_timing or use_notation_timing):
+        return max(end_ms, raw_end)
+
+    last_id = consolidation.get("last_note_id")
+    if last_id:
+        if use_notation_timing:
+            value = annotations.latest_value(last_id, NOTATION_TIMING_ANNOTATION_KIND)
+        else:
+            value = annotations.latest_value(last_id, QUANTIZATION_ANNOTATION_KIND)
+        if value and value.get("end_ms") is not None:
+            return max(end_ms, float(value["end_ms"]))
+    return max(end_ms, raw_end)
+
+
 def engrave(
         notes: List[Note],
         annotations: AnnotationStore,
@@ -332,6 +403,17 @@ def engrave(
     if key_number is not None:
         midi.key_signature_changes.append(pretty_midi.KeySignature(key_number, 0.0))
 
+    # The tempo map is built FIRST because a short pickup has to be padded out
+    # to a whole beat for beat 0 to land on a beat tick, and that pad shifts
+    # every note (see _build_beat_tick_scales). Building the map after placing
+    # the notes is what let the two disagree.
+    tick_scales: Optional[List[Tuple[int, float]]] = None
+    pad_s = 0.0
+    if beat_times_ms is not None and len(beat_times_ms) >= 2:
+        built = _build_beat_tick_scales(beat_times_ms, MIDI_RESOLUTION_PPQN)
+        if built is not None:
+            tick_scales, _beat0_tick, pad_s = built
+
     tracks: Dict[str, pretty_midi.Instrument] = {}
 
     for note in notes:
@@ -364,12 +446,14 @@ def engrave(
 
         start_ms, end_ms = _timing_for_note(note, annotations, use_quantized_timing, use_notation_timing)
         if consolidation is not None and consolidation.get("role") == "primary":
-            end_ms = max(end_ms, consolidation.get("end_ms", end_ms))
+            end_ms = _consolidated_end_ms(note, annotations, consolidation, end_ms,
+                                          use_quantized_timing, use_notation_timing)
+        start_s = max(0.0, start_ms / 1000.0 + pad_s)
         tracks[family].notes.append(pretty_midi.Note(
             velocity=note.velocity,
             pitch=note.pitch,
-            start=start_ms / 1000.0,
-            end=max(end_ms / 1000.0, start_ms / 1000.0 + 0.001),
+            start=start_s,
+            end=max(end_ms / 1000.0 + pad_s, start_s + 0.001),
         ))
 
     for track in tracks.values():
@@ -382,21 +466,18 @@ def engrave(
     # seconds->tick conversion uses the real map (without the rebuild it
     # would extrapolate every note against the final segment's tempo).
     tempo_map_segments = 0
-    if beat_times_ms is not None and len(beat_times_ms) >= 2:
-        built = _build_beat_tick_scales(beat_times_ms, MIDI_RESOLUTION_PPQN)
-        if built is not None:
-            tick_scales, _beat0_tick = built
-            max_end_s = max((inst_note.end for inst in midi.instruments for inst_note in inst.notes), default=0.0)
-            last_tick, last_scale = tick_scales[-1]
-            # The tick table must cover every note write() will convert;
-            # the last beat's time is an upper bound on the final
-            # segment's start, so this over-allocates slightly - cheap.
-            last_beat_s = beat_times_ms[-1] / 1000.0
-            extra_ticks = int(max(0.0, max_end_s - last_beat_s) / last_scale) if last_scale > 0 else 0
-            max_tick = last_tick + extra_ticks + 8 * MIDI_RESOLUTION_PPQN
-            midi._tick_scales = tick_scales
-            midi._update_tick_to_time(max_tick)
-            tempo_map_segments = len(tick_scales)
+    if tick_scales is not None:
+        max_end_s = max((inst_note.end for inst in midi.instruments for inst_note in inst.notes), default=0.0)
+        last_tick, last_scale = tick_scales[-1]
+        # The tick table must cover every note write() will convert;
+        # the last beat's time is an upper bound on the final
+        # segment's start, so this over-allocates slightly - cheap.
+        last_beat_s = beat_times_ms[-1] / 1000.0 + pad_s
+        extra_ticks = int(max(0.0, max_end_s - last_beat_s) / last_scale) if last_scale > 0 else 0
+        max_tick = last_tick + extra_ticks + 8 * MIDI_RESOLUTION_PPQN
+        midi._tick_scales = tick_scales
+        midi._update_tick_to_time(max_tick)
+        tempo_map_segments = len(tick_scales)
 
     midi.write(output_path)
 
@@ -415,6 +496,7 @@ def engrave(
                 "drop_purge_candidates": drop_purge_candidates,
                 "tempo_bpm": init_tempo,
                 "tempo_map_segments": tempo_map_segments,
+                "pickup_pad_ms": round(pad_s * 1000.0, 1),
                 "time_signature": list(time_signature) if time_signature else None,
                 "key": key,
             },

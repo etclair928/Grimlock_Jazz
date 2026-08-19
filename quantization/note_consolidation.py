@@ -68,10 +68,12 @@ def _has_attack(boundary_ms: float, onsets_ms: Sequence[float]) -> bool:  # noqa
     does."""
     if not onsets_ms:
         return False
+    # First onset at or after the window's start; it answers the question by
+    # itself, since anything later is further away. (This was written as a
+    # `while` with an unconditional `return True` and no increment - correct,
+    # but an `if` wearing a loop's clothes.)
     i = bisect.bisect_left(onsets_ms, boundary_ms - ATTACK_WINDOW_MS)
-    while i < len(onsets_ms) and onsets_ms[i] <= boundary_ms + ATTACK_WINDOW_MS:
-        return True
-    return False
+    return i < len(onsets_ms) and onsets_ms[i] <= boundary_ms + ATTACK_WINDOW_MS
 
 
 def consolidate_fragments(
@@ -128,7 +130,15 @@ def consolidate_fragments(
                 primary = run[0]
                 annotations.add(Annotation(
                     note_id=primary.id, kind=CONSOLIDATION_ANNOTATION_KIND,
-                    value={"role": "primary", "end_ms": run_end, "absorbed": len(run) - 1},
+                    # `end_ms` is a RAW performance millisecond - it is the only
+                    # timeline that exists here. `last_note_id` lets a consumer
+                    # that is rendering a DIFFERENT timeline (notation, groove)
+                    # ask that fragment for its end on that timeline instead of
+                    # pasting this raw value onto a snapped start (2026-08-17
+                    # audit).
+                    value={"role": "primary", "end_ms": run_end,
+                           "absorbed": len(run) - 1,
+                           "last_note_id": max(run, key=lambda n: n.end_ms).id},
                     source=Provenance.CONSOLIDATION, confidence=0.8,
                 ))
                 for frag in run[1:]:

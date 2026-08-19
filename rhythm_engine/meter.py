@@ -96,22 +96,31 @@ def _downbeat_salience(beat_accents: np.ndarray, numerator: int) -> Tuple[float,
     Returns (salience, phase) where phase is the beat_accents index
     (0..numerator-1) whose position-class scored loudest."""
     n = len(beat_accents)
-    best, best_phase = 0.0, 0
-    for phase in range(numerator):
-        positions: List[List[float]] = [[] for _ in range(numerator)]
-        for i in range(phase, n):
-            positions[(i - phase) % numerator].append(beat_accents[i])
-        position_means = [float(np.mean(p)) if p else 0.0 for p in positions]
-        downbeat_mean = max(position_means)
-        downbeat_idx = position_means.index(downbeat_mean)
-        other_means = [m for j, m in enumerate(position_means) if j != downbeat_idx]
-        other_mean = float(np.mean(other_means)) if other_means else 0.0
-        denom = downbeat_mean + other_mean
-        salience = (downbeat_mean - other_mean) / denom if denom > 0 else 0.0
-        if salience > best:
-            best = salience
-            best_phase = (phase + downbeat_idx) % numerator
-    return best, best_phase
+    if n < numerator:
+        return 0.0, 0
+    # ONE partition, not `numerator` rotations of it. The position CLASSES a
+    # phase induces are just a relabelling of the phase-0 classes - the old
+    # loop rebuilt all of them from scratch for every phase and then took the
+    # max, which is the same answer for numerator times the work, inside 100
+    # permutations x 8 candidate numerators (2026-08-17 audit).
+    #
+    # (The old loop also started each phase's scan at index `phase`, so each
+    # phase silently scored a different subset of the beats - a phase could win
+    # by dropping noisy leading beats rather than by finding a real downbeat.
+    # Using the whole sequence for every class removes that artifact.)
+    accents = np.asarray(beat_accents, dtype=np.float64)
+    usable = (len(accents) // numerator) * numerator
+    folded = accents[:usable].reshape(-1, numerator)
+    position_means = folded.mean(axis=0)
+
+    downbeat_idx = int(np.argmax(position_means))
+    downbeat_mean = float(position_means[downbeat_idx])
+    others = np.delete(position_means, downbeat_idx)
+    other_mean = float(others.mean()) if others.size else 0.0
+
+    denom = downbeat_mean + other_mean
+    salience = (downbeat_mean - other_mean) / denom if denom > 0 else 0.0
+    return max(0.0, salience), downbeat_idx
 
 
 def resolve_denominator(numerator: int, ratio_family: Optional[str]) -> int:
@@ -307,8 +316,53 @@ def estimate_time_signature(
     return numerator, denominator, score
 
 
+def estimate_time_signature_with_phase(
+        engine: AudioEngine,
+        track: AudioTrack,
+        beat_times_ms: Sequence[float],
+        ratio_family: Optional[str] = None,
+) -> Tuple[int, int, float, int]:
+    """estimate_time_signature, plus the DOWNBEAT PHASE it already computes.
+
+    _downbeat_salience returns which beat-in-bar carries the downbeat,
+    _score_candidate passes it up, and estimate_time_signature unpacked it into
+    `_phase` and threw it away - so the barline phase was never decided
+    anywhere, and two downstream modules each invented their own
+    (musicxml_exporter anchored bars to the earliest note in the score,
+    piano_reduction._smooth_slots to absolute zero). Returns
+    (numerator, denominator, confidence, downbeat_phase), where the phase is
+    the index into beat_times_ms of the first beat that carries a downbeat.
+    Phase 0 on the 4/4 fallback paths, which is the honest reading when there
+    was not enough evidence to say otherwise (2026-08-17 audit)."""
+    if len(beat_times_ms) < 8:
+        return 4, 4, 0.3, 0
+
+    beat_accents = sample_beat_accents(engine, track, beat_times_ms)
+
+    candidates = []
+    for numerator in CANDIDATE_NUMERATORS:
+        if len(beat_accents) < numerator * 3:
+            continue
+        score, phase, significant = _score_candidate(beat_accents, numerator)
+        if significant:
+            denominator = resolve_denominator(numerator, ratio_family)
+            candidates.append((numerator, denominator, score, phase))
+
+    if not candidates:
+        return 4, 4, 0.3, 0
+
+    candidates.sort(key=lambda c: -c[2])
+    numerator, denominator, score, phase = candidates[0]
+    # Same burden of proof detect_pickup applies: a weak downbeat is noise in
+    # the accent fold, not evidence of an anacrusis. Default to phase 0.
+    if score < PICKUP_MIN_CONFIDENCE:
+        phase = 0
+    return numerator, denominator, score, phase
+
+
 __all__ = [
     "build_phase_locked_grid", "estimate_time_signature",
+    "estimate_time_signature_with_phase",
     "sample_beat_accents", "fft_meter_candidate", "resolve_denominator",
     "PickupResult", "detect_pickup",
 ]

@@ -46,12 +46,11 @@
 
 from __future__ import annotations
 
-import bisect
-
 from dataclasses import dataclass
-from typing import Optional, Sequence
+from typing import Optional
 
 from core import Note, TempoMeter
+from core.musical_time import MusicalTime
 from quantization.duration_witness import (
     DurationTestimony, infer_duration, SYMBOLIC_DURATIONS, TUPLET_RATIOS,
 )
@@ -133,33 +132,15 @@ def _pick_symbolic_duration(testimony: DurationTestimony) -> tuple:
 # Rubato stops being noise the quantizer fights and becomes the coordinate
 # system it works in. Falls back to the isochronous grid when no beat array
 # exists, so behaviour is unchanged for callers that never had one.
-
-def _beat_position(t_ms: float, beats: Sequence[float], beat_ms: float) -> float:
-    """Performance ms -> continuous beat position, by interpolating the tracked
-    beats. Extrapolates at the constant local rate outside their span."""
-    n = len(beats)
-    if n < 2:
-        return (t_ms - (beats[0] if n else 0.0)) / beat_ms
-    if t_ms <= beats[0]:
-        return (t_ms - beats[0]) / max(beats[1] - beats[0], 1.0)
-    if t_ms >= beats[-1]:
-        return (n - 1) + (t_ms - beats[-1]) / max(beats[-1] - beats[-2], 1.0)
-    i = bisect.bisect_right(beats, t_ms) - 1
-    span = max(beats[i + 1] - beats[i], 1.0)
-    return i + (t_ms - beats[i]) / span
-
-
-def _beat_to_ms(pos: float, beats: Sequence[float], beat_ms: float) -> float:
-    """Inverse of _beat_position."""
-    n = len(beats)
-    if n < 2:
-        return (beats[0] if n else 0.0) + pos * beat_ms
-    if pos <= 0.0:
-        return beats[0] + pos * max(beats[1] - beats[0], 1.0)
-    if pos >= n - 1:
-        return beats[-1] + (pos - (n - 1)) * max(beats[-1] - beats[-2], 1.0)
-    i = int(pos)
-    return beats[i] + (pos - i) * max(beats[i + 1] - beats[i], 1.0)
+#
+# THAT CONVERSION LIVES IN core/musical_time.py AND NOWHERE ELSE (2026-08-17
+# audit). This module used to carry its own `_beat_position`/`_beat_to_ms` -
+# a second implementation of MusicalTime.to_beats/to_ms with the same
+# interpolation, none of its glitch-confidence logic, and no way to keep the
+# two in step. Two implementations of one map is the duplicated-fact disease
+# §9 exists to remove, and it is exactly how the +9.6% Chopin fix got reverted
+# one layer down the first time. `musical_time` is threaded in from the
+# Conductor; absent one, it is built from the TempoMeter's own beats here.
 
 
 def notation_quantize_note(
@@ -167,6 +148,7 @@ def notation_quantize_note(
         tempo_meter: TempoMeter,
         duration_testimony: Optional[DurationTestimony] = None,
         grid_origin_ms: Optional[float] = None,
+        musical_time: Optional[MusicalTime] = None,
 ) -> Optional[NotationTiming]:
     """Hard-snaps `note`'s onset to the metrical grid and gives it a
     clean symbolic duration (simplicity-tie-broken). Returns None when
@@ -188,25 +170,27 @@ def notation_quantize_note(
     # Hard snap onset to the nearest grid subdivision - no pocket. This
     # is the whole difference from groove quantization: reading clarity
     # over microtiming preservation.
-    beats = list(tempo_meter.beat_times_ms or ())
+    if musical_time is None and tempo_meter.beat_times_ms:
+        musical_time = MusicalTime.from_beats(tempo_meter.beat_times_ms,
+                                              fallback_beat_ms=beat_ms)
     testimony = duration_testimony or infer_duration(note, beat_ms)
     symbolic_value, notation_dur, tie_broken = _pick_symbolic_duration(testimony)
 
-    if len(beats) >= 2 and grid_origin_ms is None:
+    if musical_time is not None and musical_time.usable and grid_origin_ms is None:
         # BEAT-SPACE SNAP. Position the onset against the beat it actually
         # belongs to, snap there, and map back - so a note played inside a
         # ritardando lands on the correct subdivision of the correct beat
         # rather than wherever a metronome would have been.
-        pos = _beat_position(note.start_ms, beats, beat_ms)
-        snapped = round(pos * subdiv) / subdiv
-        notation_start = _beat_to_ms(snapped, beats, beat_ms)
+        notation_start, _residual = musical_time.snap(note.start_ms, subdiv)
         # The duration is STRUCTURAL, so carry it in beats: both ends move
         # together under rubato and a stretched quarter still reads as a
         # quarter. (Measured: duration distortion vs the consolidated source
         # was 139% under the isochronous grid.)
         dur_beats = notation_dur / beat_ms if beat_ms > 0 else 0.0
-        notation_end = _beat_to_ms(snapped + dur_beats, beats, beat_ms)
-        grid_desc = f"1/{subdiv}-beat grid (tempo map, {len(beats)} tracked beats)"
+        notation_end = musical_time.to_ms(
+            musical_time.to_beats(notation_start) + dur_beats)
+        grid_desc = (f"1/{subdiv}-beat grid (tempo map, "
+                     f"{len(musical_time.beats_ms)} tracked beats)")
     else:
         steps_from_origin = round((note.start_ms - origin) / grid_step)
         notation_start = origin + steps_from_origin * grid_step
