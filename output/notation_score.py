@@ -361,6 +361,13 @@ def build_routed_score(
         # represented. On this repertoire that trade is measurably worth it.
         max_voices: int = 2,
         honor_university: bool = False,
+        # OctaveStack (acoustic_witness.octave_stack). Off by default like
+        # every other output-changing switch here, and for the same reason:
+        # raw output stays byte-identical until someone asks for the change.
+        # When on, the interior of a 3+-octave stack struck within one
+        # gesture is left off the page - measured at 87.2% precision against
+        # the answer key, +0.0035 F1 for 0.0055 recall.
+        drop_octave_stacks: bool = False,
         fill_max_beats: float = 1.0,
         musical_time=None,
         bar_origin_ms: Optional[float] = None,
@@ -387,6 +394,11 @@ def build_routed_score(
     uni_drop: set = set()
     uni_extend: Dict[str, float] = {}
     uni_cohesion: Dict[str, str] = {}
+    if drop_octave_stacks:
+        # Folded into the same drop set the loop below already consults, so
+        # there is exactly one place a note can vanish from the page.
+        from acoustic_witness.octave_stack import octave_suppression_ids
+        uni_drop |= octave_suppression_ids(annotations, [n.id for n in notes])
     if honor_university:
         try:
             from university.apply import page_suppression_map

@@ -39,7 +39,8 @@ from pitch_engine import (
     transcribe_crepe_bass, BASIC_PITCH_SAMPLE_RATE, continuous_f0, make_f0_sampler,
 )
 from instrument_attribution import resolve_instrument_identity, check_range, RANGE_ANNOTATION_KIND
-from key_intelligence import analyze_key, analyze_key_from_notes, key_fit, KEY_FIT_ANNOTATION_KIND, KeyResult
+from key_intelligence import (analyze_key, analyze_key_from_notes, analyze_key_stability,
+                              key_fit, KEY_FIT_ANNOTATION_KIND, KeyResult)
 from rhythm_engine import (
     estimate_time_signature_with_phase, classify_drift,
     run_librosa_tempo, run_madmom_tempo, run_note_onset_tempo_witness, run_lattice_witness,
@@ -65,6 +66,7 @@ from acoustic_witness import (
     analyze_stem, AnechoicReport, ACOUSTIC_ACTIVITY_ANNOTATION_KIND,
     audit_note, HarmonicVerdict, HARMONIC_LEGITIMACY_ANNOTATION_KIND,
     evaluate_stem_support, NOTE_SUPPORT_ANNOTATION_KIND, NOTE_SUPPORT_SAMPLE_RATE, UNSUPPORTED,
+    write_octave_annotations,
 )
 from check import run_check
 from university import UniversityMode
@@ -397,6 +399,29 @@ def transcribe_file(
             key_result = notes_key
             findings.key = notes_key.key
             findings.key_confidence = notes_key.confidence
+        # STABILITY (key_intelligence/key_stability.py). A key label is worth
+        # what the span supports, and until now nothing measured that. Chopin
+        # returned 0.84 for D# minor on a 180-second EXCERPT of a B major
+        # piece - and that reading is correct for the excerpt, because the
+        # published edition reads D# minor over the same span. What was wrong
+        # was the certainty. The reported key is never overridden here; only
+        # its confidence is damped, and the windows are logged so a modulation
+        # can be pointed at instead of averaged away.
+        stability = analyze_key_stability(pitched_notes)
+        findings.key_confidence = stability.confidence
+        music_box.log_decision(
+            stage_name="key_intelligence", decision_type="key_stability",
+            before_state={"key": stability.key,
+                          "raw_confidence": round(stability.raw_confidence, 3)},
+            after_state={"confidence": round(stability.confidence, 3),
+                         "agreement": round(stability.agreement, 3),
+                         "modulates": stability.modulates,
+                         "windows": [k for _s, _e, k in stability.windows],
+                         "cadence_key": stability.cadence_key,
+                         "cadence_agrees": stability.cadence_agrees},
+            reasoning=stability.notes,
+            reversible=False,
+        )
         music_box.log_decision(
             stage_name="key_intelligence", decision_type="key_from_notes",
             before_state={"audio_key": audio_key.key,
@@ -1066,6 +1091,23 @@ def transcribe_file(
                   f"verdict only, dropped at export only under drop_purge_candidates)",
         reversible=False,
     )
+    # OctaveStack: the interior of a 3+-octave stack struck as one gesture
+    # is the pitch detector reporting harmonics of a note it already has.
+    # Verdict only, like its three sibling witnesses - the notes stay.
+    octave_counts = write_octave_annotations(
+        pitched_notes, annotations, Provenance.OCTAVE_STACK)
+    music_box.log_decision(
+        stage_name="acoustic_witness", decision_type="octave_stack",
+        before_state={}, after_state=dict(octave_counts),
+        reasoning=(f"OctaveStack flagged {octave_counts['interior_flagged']} of "
+                   f"{len(pitched_notes)} pitched notes as the INTERIOR of an "
+                   f"octave stack across {octave_counts['distinct_stacks']} distinct "
+                   f"stacks - a published edition never writes a pitch class at more "
+                   f"than 2 octaves in one struck chord, so the outer pair is real and "
+                   f"the filling reads as harmonics (verdict only - notes are not "
+                   f"deleted; dropped at export only under drop_purge_candidates)"),
+        reversible=False,
+    )
     music_box.log_decision(
         stage_name="acoustic_witness", decision_type="schoenberg_mirror",
         before_state={}, after_state={"illegitimate_verdicts": harmonic_illegitimate_count},
@@ -1312,6 +1354,7 @@ def transcribe_file(
                 time_signature=(meter_resolution.numerator, meter_resolution.denominator),
                 key=findings.key, use_consolidation=True, ratio_family=ratio_family,
                 honor_university=uni_mode.applies,
+                drop_octave_stacks=drop_purge_candidates,
                 musical_time=musical_time,
                 bar_origin_ms=bar_origin_ms,
             )

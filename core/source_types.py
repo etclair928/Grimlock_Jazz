@@ -46,6 +46,7 @@ class Provenance(str, Enum):
     # acoustic_witness/ module docstring)
     ANECHOIC_MA = "anechoic_ma"
     SCHOENBERG_MIRROR = "schoenberg_mirror"
+    OCTAVE_STACK = "octave_stack"
 
     # Key Intelligence (annotation-only, §7-adjacent - see
     # key_intelligence/ module docstring)

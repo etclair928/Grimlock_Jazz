@@ -263,63 +263,6 @@ def _apply_tuplet(el, ql, divisor: int):
     return float(el.quarterLength)
 
 
-def _clamp_to_beat_frame(onset, ql):
-    """Shorten `ql` so the event cannot leave the beat it started in.
-
-    A tuplet is a statement about how ONE metric unit is divided, so it must
-    end inside that unit - and since a beat never spans a barline, staying
-    inside the beat makes crossing a barline impossible too. Returns the
-    clamped length, which may be <= 0 when the event starts exactly on the
-    frame edge; the caller drops those.
-
-    CLAMP, NOT REJECT (corrected 2026-08-18). The previous version of this
-    guard rejected any tuplet whose onset was not exactly on a slot and fell
-    back to the binary grid - but the smallest binary value is 1/8 of a beat,
-    so a 1/12-beat scrap was rounded UP, and lengthening notes pushed 50 of
-    them over barlines where there had been 1. Shortening is always safe;
-    lengthening never is.
-
-    MEASURED ORIGIN (Chopin bar 29): the gap clamp handed _apply_tuplet a
-    1/24-beat leftover at offset 1.5417, which it faithfully rendered as a
-    64th triplet in a frame anchored to nothing, running 0.042 past the bar."""
-    import math as _math
-    frame_end = _math.floor(float(onset) + 1e-9) + 1.0
-    return min(float(ql), frame_end - float(onset))
-
-
-def _leading_tuplet_rest(onset, divisor: int):
-    """The tuplet rest that holds the frame on the beat when the first sounding
-    slot is not slot 0 - a rest on "Tri" before a note on "ple".
-
-    Returns (rest_offset, rest_element) or None when the note already starts on
-    its beat. The rest carries the SAME tuplet as the notes, which is what
-    keeps the container visibly anchored; an ordinary rest of the same
-    clock-length would sit outside the bracket and put the reader back where
-    they started, hunting for the beat.
-
-    Generalises to any divisor: the silent span is (onset - beat start), which
-    is always a whole number of tuplet slots because the onset was snapped onto
-    that grid."""
-    from music21 import note as m21note
-    beat_start = Fraction(int(Fraction(onset))) if onset >= 0 else Fraction(0)
-    silent = Fraction(onset) - beat_start
-    if silent <= 0:
-        return None
-    rest = m21note.Rest()
-    _apply_tuplet(rest, silent, divisor)
-    return float(beat_start), rest
-
-
-# Which "in the time of" a subdivision is written against: the largest power of
-# two at or below it, which is the convention every edition uses - 6 in the
-# time of 4, 5 in the time of 4, 7 in the time of 4, 12 in the time of 8.
-def _normal_count(divisor: int) -> int:
-    n = 1
-    while n * 2 <= divisor:
-        n *= 2
-    return n
-
-
 # Percussion staff placement (GRIMLOCK_6.0_OPEN_PROBLEMS.md §XVI.10 item 2).
 # Drums are NOT pitched: writing them as MIDI 36/38/42 on a normal staff puts a
 # kick on F2 and a hi-hat on F#3, which is wrong notation - no drummer reads
@@ -593,6 +536,7 @@ def build_music21_score(score: NotationScore, grid_chords: bool = True):
     from music21 import stream, note as m21note, chord as m21chord, tempo as m21tempo
     from music21 import meter as m21meter, key as m21key, instrument as m21instrument
     from music21 import tie as m21tie
+
 
     # WHERE BAR 1 STARTS, AND WHERE THE PICKUP GOES.
     #
@@ -903,6 +847,42 @@ def export_musicxml(score: NotationScore, path: str, grid_chords: bool = True) -
     m_score.write("musicxml", fp=path)
     _normalize_voice_numbers(path)
     return path
+
+
+# ---------------------------------------------------------------------
+# OPEN DEFECT: elements that cross a barline, and why no in-memory guard
+# can stop them (measured 2026-08-20, Hopeful/HRV/Chopin FULLRUN).
+#
+# THE RULE IS ABSOLUTE - "Tuplets must never cross barlines. NEVER" - and it
+# is currently violated 13 times on Hopeful (0.3% of 4703 notes), 12 on HRV,
+# 12 on Chopin. Before chasing it again, three measured facts, because the
+# obvious fixes have all been tried and none of them work:
+#
+# 1. IT IS MOSTLY NOT A TUPLET PROBLEM. Only 2 of Hopeful's 13 crossing
+#    elements carry a tuplet at all. The rest are ordinary notes and rests
+#    with clean binary durations. `_clamp_to_beat_frame` is doing its job;
+#    fixing the bracket code again will not move this number.
+#
+# 2. THE DOMINANT CAUSE IS A CONTAMINATED ONSET, NOT A LONG DURATION. Eight
+#    of the thirteen sit at k + 1/24 - e.g. a clean 2.0-quarter note at
+#    offset 4.0417 running to 6.0417 in a 6/4 bar. Nothing is wrong with the
+#    length, so no duration-side guard can see it. 1/24 of a quarter is 17ms
+#    at 148bpm. The fix belongs upstream, where onsets are snapped: a note
+#    may not land 1/24 of a beat off a legal metric position.
+#
+# 3. A GUARD HERE CANNOT WORK, WHICH IS WHY THERE ISN'T ONE. music21's
+#    MusicXML writer runs its OWN notation pass at serialization, and that
+#    pass pads short voices with a rest of a full `barDuration` regardless of
+#    the offset it starts at (offset 1.0 + a 6.0 rest in a 6/4 bar - three of
+#    Hopeful's thirteen). It runs AFTER anything we do in memory: a clamp
+#    inserted before `.write()` reported 0 elements touched while the written
+#    file still had 13. Passing `makeNotation=False` to suppress that pass
+#    raises "Cannot convert complex durations to MusicXML", and calling
+#    `splitAtDurations()` first does not clear it. So the only enforcement
+#    point that is provably last is the post-write XML pass in
+#    `_normalize_voice_numbers` - walking <measure> with <divisions>, <backup>
+#    and <forward> to trim what overruns. That is where a future fix goes.
+# ---------------------------------------------------------------------
 
 
 __all__ = ["build_music21_score", "export_musicxml"]

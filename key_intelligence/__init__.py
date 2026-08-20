@@ -15,6 +15,9 @@ from key_intelligence.key_detector import (
     KeyResult, detect_key, analyze_key, analyze_key_from_notes, chroma_from_notes, key_fit,
     KEY_FIT_ANNOTATION_KIND, KEY_CONFIDENCE_THRESHOLD,
 )
+from key_intelligence.key_stability import (
+    KeyStability, analyze_key_stability, STABLE_MIN_AGREEMENT,
+)
 
 __all__ = [
     "KeyResult",
@@ -25,4 +28,7 @@ __all__ = [
     "key_fit",
     "KEY_FIT_ANNOTATION_KIND",
     "KEY_CONFIDENCE_THRESHOLD",
+    "KeyStability",
+    "analyze_key_stability",
+    "STABLE_MIN_AGREEMENT",
 ]

@@ -23,6 +23,10 @@ from acoustic_witness.note_support import (
     SupportVerdict, evaluate_stem_support, NOTE_SUPPORT_ANNOTATION_KIND,
     NOTE_SUPPORT_SAMPLE_RATE, SUPPORTED, UNSUPPORTED,
 )
+from acoustic_witness.octave_stack import (
+    OCTAVE_STACK_ANNOTATION_KIND, find_octave_stacks,
+    write_octave_annotations, octave_suppression_ids,
+)
 
 __all__ = [
     "AnechoicReport",
@@ -43,4 +47,8 @@ __all__ = [
     "NOTE_SUPPORT_SAMPLE_RATE",
     "SUPPORTED",
     "UNSUPPORTED",
+    "OCTAVE_STACK_ANNOTATION_KIND",
+    "find_octave_stacks",
+    "write_octave_annotations",
+    "octave_suppression_ids",
 ]

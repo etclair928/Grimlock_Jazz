@@ -28,7 +28,8 @@ from quantization import (
     ONSET_REFINEMENT_ANNOTATION_KIND,
     CONSOLIDATION_ANNOTATION_KIND,
 )
-from acoustic_witness import HARMONIC_LEGITIMACY_ANNOTATION_KIND, NOTE_SUPPORT_ANNOTATION_KIND, UNSUPPORTED
+from acoustic_witness import (HARMONIC_LEGITIMACY_ANNOTATION_KIND, NOTE_SUPPORT_ANNOTATION_KIND,
+                              OCTAVE_STACK_ANNOTATION_KIND, UNSUPPORTED)
 
 _HARMONIC_ILLEGITIMATE_VERDICTS = ("noise", "hallucination")
 
@@ -381,7 +382,9 @@ def engrave(
     HALLUCINATION; or the note-support filter (acoustic_witness.
     note_support - weak own-f0 energy AND acoustically inactive, the two
     signals a 3-song diagnostic showed actually discriminate over-
-    detection/bleed) marking UNSUPPORTED. They answer the same underlying
+    detection/bleed) marking UNSUPPORTED; and OctaveStack
+    (acoustic_witness.octave_stack) marking the interior of a 3+-octave
+    stack struck as one gesture. They answer the same underlying
     question from different evidence, so they share one opt-in flag
     rather than proliferating near-duplicate ones. NOTE: the diagnostic
     found MicroNotePurge's and SchoenbergMirror's signals barely
@@ -426,6 +429,14 @@ def engrave(
                 continue
             support = annotations.latest_value(note.id, NOTE_SUPPORT_ANNOTATION_KIND)
             if support is not None and support.get("verdict") == UNSUPPORTED:
+                continue
+            # OctaveStack: the interior of a 3+-octave stack struck as one
+            # gesture. The only one of these four witnesses with a measured
+            # ablation behind it (tools/octave_ablation.py) - 87.2% of what
+            # it drops has no counterpart in the answer key, +0.0035 F1 for
+            # 0.0055 recall. Small, and measured rather than hoped for.
+            octave = annotations.latest_value(note.id, OCTAVE_STACK_ANNOTATION_KIND)
+            if octave is not None and octave.get("role") == "interior":
                 continue
 
         # Consolidation (opt-in): a same-pitch fragment absorbed into an
