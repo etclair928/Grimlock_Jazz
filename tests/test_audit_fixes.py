@@ -255,9 +255,29 @@ def test_the_gap_clamp_produces_a_notatable_duration():
 
 
 def test_notatable_helpers_agree_with_each_other():
+    """UPDATED when notatable_at_most stopped violating its own ceiling.
+
+    This used to assert the result was always a member of the vocabulary,
+    which is exactly what let the bug through: when nothing in the table fit
+    under the ceiling the function returned the SMALLEST member - a value too
+    LONG - and this test passed, because that value is indeed in the
+    vocabulary. The property worth asserting is the ceiling itself; "or 0.0,
+    meaning nothing fits" is the honest completion of the contract."""
     for value in (0.1, 0.26, 0.4, 0.51, 0.9, 1.4, 2.9, 5.0, 100.0):
         assert nearest_notatable(value, True) in notatable_values(True)
-        assert notatable_at_most(value, False) in notatable_values(False)
+        at_most = notatable_at_most(value, False)
+        assert at_most <= value + 1e-9, "the ceiling must never be exceeded"
+        assert at_most == 0.0 or at_most in notatable_values(False)
+
+
+def test_a_ceiling_below_every_notatable_value_yields_nothing():
+    """THE k/24 BUG, pinned. A note with 1/12 of a beat of room used to be
+    written 1/8 long - the smallest binary value - overrunning by exactly
+    1/8 - 1/12 = 1/24 and displacing every onset after it onto a k/24
+    position. There is no binary value that small, and saying so is the only
+    correct answer."""
+    assert notatable_at_most(1.0 / 12.0, False) == 0.0
+    assert notatable_at_most(0.001, False) == 0.0
 
 
 # --- #09  the MusicXML DOCTYPE survives the voice renumbering -------------

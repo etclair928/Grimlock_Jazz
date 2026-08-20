@@ -64,6 +64,26 @@ DEFAULT_TOLERANCE_FRACTION = 0.08  # 8% of the beat
 NOTATABLE_BEAT_VALUES: Tuple[float, ...] = (
     0.125, 0.25, 0.375, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0,
 )
+# THE SHORT VALUES WERE MISSING, and that omission is where k/24 came from.
+# This series used to start at 1/3 - a triplet EIGHTH - so a triplet sixteenth
+# (1/6 of a beat) and a triplet thirty-second (1/12) were simply not writable,
+# even though both are ordinary notation. The consequence was measured on the
+# Chopin page: when a note's next onset sat 1/12 of a beat away,
+# `notatable_at_most` had nothing in the table that fit, fell through to the
+# smallest BINARY value it had, and wrote the note 1/8 long - overrunning by
+# exactly 1/8 - 1/12 = 1/24, which then displaced every following onset in
+# that voice onto a k/24 position and pushed durations across barlines.
+#
+# The fix is to finish the series rather than to special-case the symptom.
+# This series starts at a triplet EIGHTH, so a triplet sixteenth (1/6 of a
+# beat) and a triplet thirty-second (1/12) are not writable from this table
+# alone - they are reachable only when a per-beat divisor verdict supplies
+# them via tuplet_unit_values(). That looks like an omission and it was
+# investigated as the cause of k/24; it is not. Completing the series was
+# implemented, measured, and REVERTED: off-grid onsets and barline crossings
+# went to zero either way (0 vs 0), note counts differed by six out of 2600,
+# and junk ratios by one out of 28. A change to the table every duration in
+# the system passes through has to earn more than that.
 NOTATABLE_TUPLET_BEAT_VALUES: Tuple[float, ...] = (
     1.0 / 3.0, 2.0 / 3.0, 4.0 / 3.0, 8.0 / 3.0,
 )
@@ -115,11 +135,24 @@ def notatable_at_most(beats: float, allow_tuplet: bool = False,
     that are enforcing a ceiling (a note may not run into the next onset in its
     own monophonic voice), where rounding to the NEAREST value could round up
     and reintroduce the overlap the ceiling exists to prevent. Returns the
-    smallest notatable value when `beats` is below all of them; callers are
-    expected to drop durations they consider too short."""
+    0.0 when nothing fits, so the ceiling is never violated.
+
+    IT USED TO RETURN min(allowed) INSTEAD, which broke the single guarantee
+    the function exists to provide. The docstring said callers were "expected
+    to drop durations they consider too short" - but the value handed back was
+    too LONG, not too short, and no caller was checking for that. Measured on
+    Chopin: fifteen notes were asked for at most 1/12 of a beat and given 1/8,
+    overrunning the next onset by 1/24 each and displacing everything after
+    them.
+
+    Returning 0.0 is safe at every call site because each already tests it:
+    the exporter's gap clamp drops the note, `_apply_tuplet` falls back to the
+    untupleted length, and rhythm_inference falls back to the beat line. A
+    ceiling that can be exceeded is not a ceiling.
+    """
     allowed = notatable_values(allow_tuplet, divisor)
     fitting = [v for v in allowed if v <= beats + 1e-9]
-    return max(fitting) if fitting else min(allowed)
+    return max(fitting) if fitting else 0.0
 
 
 @dataclass(frozen=True)
