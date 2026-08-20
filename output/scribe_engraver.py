@@ -432,9 +432,10 @@ def engrave(
                 continue
             # OctaveStack: the interior of a 3+-octave stack struck as one
             # gesture. The only one of these four witnesses with a measured
-            # ablation behind it (tools/octave_ablation.py) - 87.2% of what
-            # it drops has no counterpart in the answer key, +0.0035 F1 for
-            # 0.0055 recall. Small, and measured rather than hoped for.
+            # ablation behind it (tools/octave_ablation.py), and that
+            # ablation says it only helps where the input carries STEM BLEED:
+            # +0.0035 F1 on a six-stem run of a solo piano record, -0.0033 on
+            # the same piece with one clean harmonic stem. Off by default.
             octave = annotations.latest_value(note.id, OCTAVE_STACK_ANNOTATION_KIND)
             if octave is not None and octave.get("role") == "interior":
                 continue

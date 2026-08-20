@@ -25,28 +25,42 @@
 # lowest and the highest member of a chain of >= 3, flag what is between.
 # Chains of exactly two are never touched - that is the writing itself.
 #
-# WHAT IT IS WORTH, measured by ablation against the answer key rather
-# than asserted (tools/octave_ablation.py, which calls THIS function - an
-# earlier version of that tool reimplemented the rule and reported a
-# number this code does not produce):
+# WHAT IT IS WORTH, AND WHEN IT IS WORTH NOTHING. Measured by ablation
+# (tools/octave_ablation.py, which calls THIS function). Read both rows -
+# the second one is why this witness is off by default and must stay off
+# for clean input:
 #
-#     variant                kept   prec   recall    F1
-#     baseline               1920  0.374   0.785   0.507
-#     octave stacks dropped  1881  0.379   0.779   0.510
+#   Chopin Op.62 No.1, 180s clip, six Demucs stems on a SOLO PIANO record
+#     baseline               1920 notes  prec 0.374  rec 0.785  F1 0.507
+#     octave stacks dropped  1881 notes  prec 0.379  rec 0.779  F1 0.510
+#     -> 39 dropped, 87.2% unmatched by the answer key, +0.0035 F1
 #
-# 39 notes dropped, of which 34 had no counterpart in the answer key:
-# 87.2% precise, for +0.0035 F1. Small and real. It is not a headline
-# number and is not offered as one - it is one witness among four, and
-# the discipline that matters is that its cost in recall (0.0055) was
-# measured rather than hoped for.
+#   Same piece, FULL 411s recording, one harmonic stem (no phantom stems)
+#     baseline               3204 notes  prec 0.512  rec 0.735  F1 0.603
+#     octave stacks dropped  3147 notes  prec 0.513  rec 0.723  F1 0.600
+#     -> 57 dropped, only 54.4% unmatched, -0.0033 F1
+#
+# THE FILTER WAS CATCHING SOMEONE ELSE'S BUG. On the six-stem run the
+# pipeline invented 463 "bass" and 200 "vocal" notes on a recording with no
+# bassist or singer, and those phantoms stacked octaves against the real
+# piano notes. That is what the 87.2% was measuring: stem bleed, not
+# detector octave error. Give the pipeline clean solo-piano input and the
+# remaining stacks are largely Chopin's own octave doubling - 26 of the 57
+# flagged notes are real notes in the published edition, and the rule
+# becomes a coin flip that costs recall.
+#
+# SO: this is a contamination detector, not an octave detector. It earns its
+# keep only where the input carries stem bleed, and on clean input it should
+# be left off - which it is, behind drop_purge_candidates, off by default.
+# The honest lesson is upstream: fixing WHY a solo piano recording produces
+# bass and vocal notes was worth 0.096 F1 in one step, roughly thirty times
+# anything this witness ever contributed.
 #
 # WHAT IT DELIBERATELY LEAVES ON THE TABLE. Counting two detections of the
-# SAME pitch as two rungs of the chain would flag 238 notes instead of 39,
-# at 94.6% precision and +0.036 F1 - ten times the yield. Those extra
-# notes are real errors, but they are RE-STRIKES, which is
-# quantization/note_consolidation's problem and not an octave stack. A
-# filter that swallows a neighbouring pass's job scores well and makes the
-# system harder to reason about; the yield is left where it belongs.
+# SAME pitch as two rungs of the chain flagged 238 notes instead of 39 on
+# the clip. Those extra notes are real errors, but they are RE-STRIKES,
+# which is quantization/note_consolidation's problem and not an octave
+# stack. The yield is left where it belongs.
 #
 # WHY NOT THE PLAYABILITY MODEL. output/playability.py can also call a
 # stack impossible, and the same ablation says that route is far weaker:

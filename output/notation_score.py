@@ -365,8 +365,9 @@ def build_routed_score(
         # every other output-changing switch here, and for the same reason:
         # raw output stays byte-identical until someone asks for the change.
         # When on, the interior of a 3+-octave stack struck within one
-        # gesture is left off the page - measured at 87.2% precision against
-        # the answer key, +0.0035 F1 for 0.0055 recall.
+        # gesture is left off the page. Worth it only where the input has
+        # stem bleed: +0.0035 F1 on a six-stem run of a solo piano record,
+        # -0.0033 on the same piece with one clean harmonic stem.
         drop_octave_stacks: bool = False,
         fill_max_beats: float = 1.0,
         musical_time=None,
