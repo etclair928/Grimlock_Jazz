@@ -34,6 +34,7 @@ from core import TempoMeter
 from separation_engine import separate
 from separation_engine import merge_harmonic_stems as _merge_harmonic_stems
 from separation_engine import load_cached_separation as _load_cached_separation
+from separation_engine import detect_solo_instrument, SOLO_PIANO
 from pitch_engine import (
     transcribe_basic_pitch, transcribe_basic_pitch_with_posteriorgram,
     transcribe_crepe_bass, BASIC_PITCH_SAMPLE_RATE, continuous_f0, make_f0_sampler,
@@ -155,6 +156,12 @@ def transcribe_file(
         save_intermediate_path: Optional[Union[str, Path]] = None,
         university_mode: Union[str, "UniversityMode"] = "off",
         stem_cache_dir: Optional[Union[str, Path]] = None,
+        # The solo fast path (see the call site). On by default because the
+        # gate measured zero false "solo" verdicts across every recording in
+        # the corpus, and because the failure it prevents is worse than the
+        # one it risks - but it is a switch, so a caller who wants Demucs on
+        # a solo record can still have it.
+        skip_separation_when_solo: bool = True,
         university_corpus_path: Optional[Union[str, Path]] = None,
 ) -> PipelineResult:
     start_time = time.time()
@@ -202,6 +209,47 @@ def transcribe_file(
                           "identical; skips the largest model in the pipeline.",
                 reversible=False,
             )
+    # SOLO FAST PATH (separation_engine/solo_detector.py). Demucs is the
+    # largest model in a run, and on a solo recording it is not just wasted
+    # but harmful: separating the solo piano Nocturne into six stems produced
+    # 1546 "drum", 463 "bass" and 200 "vocal" notes on a recording with no
+    # drummer, bassist or singer, and passing the same audio through as ONE
+    # harmonic stem moved F1 from 0.507 to 0.603. So the cheap physical test
+    # runs first, and a confident solo verdict skips separation entirely.
+    #
+    # ONLY a confident solo verdict. The asymmetry is the whole design: a
+    # wrong "solo" silently discards real instruments and nothing downstream
+    # could notice, while a wrong "ensemble" costs only time.
+    if separation is None and skip_separation_when_solo:
+        solo = detect_solo_instrument(engine, master_track)
+        music_box.log_decision(
+            stage_name="separation_engine", decision_type="solo_probe",
+            before_state={}, after_state={
+                "verdict": solo.verdict, "confidence": round(solo.confidence, 3),
+                "instrument_confidence": round(solo.instrument_confidence, 3),
+                "kit_hf_fraction": round(solo.kit_hf_fraction, 4),
+                "crescendo_fraction": round(solo.crescendo_fraction, 4),
+                "low_energy_fraction": round(solo.low_energy_fraction, 4)},
+            reasoning=solo.reason, reversible=False,
+        )
+        if solo.is_solo:
+            stem = (StemType.PIANO if solo.verdict == SOLO_PIANO
+                    else StemType.GUITAR)
+            separation = Separation(
+                stems={stem: master_track},
+                model_used=f"solo_fast_path({solo.verdict})",
+                confidence=solo.confidence, separation_time_seconds=0.0,
+            )
+            music_box.log_decision(
+                stage_name="separation_engine", decision_type="separation_skipped",
+                before_state={"model": separation_model},
+                after_state={"stem": stem.value},
+                reasoning=(f"Skipped Demucs: {solo.reason}. The master audio IS "
+                           f"the {stem.value} stem, so no drums/bass/vocals stem "
+                           f"exists for the detector to hallucinate into."),
+                reversible=False,
+            )
+
     if separation is None:
         separation = separate(
             engine, master_track, model_name=separation_model, device=device, seed=separation_seed,

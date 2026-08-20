@@ -50,5 +50,15 @@ print(f"  total notes: {res.total_notes_exported}")
 print(f"  MIDI:  {midi}")
 print(f"  MXL:   {mxl}")
 print(f"  PKL:   {pkl}")
-print(f"  STEMS: {'CACHED (Demucs skipped)' if stem_cache else 'separated live'}")
+# The solo fast path also skips Demucs, and this line used to report
+# "separated live" when it fired, because it only knew about the cache.
+# res.separation_model is the thing that actually knows.
+_model = str(getattr(res, "separation_model", ""))
+if "solo_fast_path" in _model:
+    _stems_note = f"SOLO FAST PATH - Demucs skipped ({_model})"
+elif stem_cache:
+    _stems_note = "CACHED (Demucs skipped)"
+else:
+    _stems_note = "separated live"
+print(f"  STEMS: {_stems_note}")
 print(f"  UNIVERSITY: mode={uni}" + (f"  corpus={corpus}" if uni!="off" else ""))

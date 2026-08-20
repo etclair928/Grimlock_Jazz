@@ -7,5 +7,11 @@
 
 from separation_engine.demucs_engine import separate
 from separation_engine.stem_merge import merge_harmonic_stems, load_cached_separation, HARMONIC_STEMS
+from separation_engine.solo_detector import (
+    SoloVerdict, detect_solo_instrument, analyze_solo,
+    SOLO_PIANO, SOLO_GUITAR, ENSEMBLE, UNKNOWN,
+)
 
-__all__ = ["separate", "merge_harmonic_stems", "load_cached_separation", "HARMONIC_STEMS"]
+__all__ = ["separate", "merge_harmonic_stems", "load_cached_separation", "HARMONIC_STEMS",
+    "SoloVerdict", "detect_solo_instrument", "analyze_solo",
+    "SOLO_PIANO", "SOLO_GUITAR", "ENSEMBLE", "UNKNOWN"]

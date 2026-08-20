@@ -45,6 +45,16 @@ from output.notation_score import NotationNote, NotationPart, NotationScore
 SPAN_MAX_SEMITONES = 14
 FINGERS_PER_HAND = 5
 
+# The shape limit, from output/playability.py's hand model: between thumb and
+# the rest of the hand sits one large gap, and fingers 2-3-4-5 stay close. A
+# span limit alone admits a five-note cluster and rejects a real tenth, so
+# this is what makes the emission cost below describe a HAND rather than a
+# width. Deliberately the COMFORTABLE value rather than playability's own
+# 17-semitone default: that default exists so a positive means "physically
+# impossible", while this decides where a staff should split, which is a
+# question about what reads well, not about what is barely possible.
+INNER_GAP_MAX_SEMITONES = 5
+
 # Register-split Viterbi search grid + hysteresis. The switch penalty is the
 # cost of moving the treble/bass boundary by one semitone between beats; it is
 # what stops the split churning bar to bar. Grid E3..D5 covers every sane
@@ -182,6 +192,7 @@ def assign_hands(
         switch_penalty: float = SPLIT_SWITCH_PENALTY,
         span_max: int = SPAN_MAX_SEMITONES,
         fingers_max: int = FINGERS_PER_HAND,
+        inner_gap_max: int = INNER_GAP_MAX_SEMITONES,
         b_lo: int = SPLIT_BOUNDARY_LO,
         b_hi: int = SPLIT_BOUNDARY_HI,
         step: int = SPLIT_BOUNDARY_STEP,
@@ -202,15 +213,38 @@ def assign_hands(
     windows = sorted(win_pitches.keys())
     boundaries = list(range(b_lo, b_hi + 1, step))
 
+    # The cost of putting the treble/bass boundary at `b` during window `w`.
+    #
+    # WHAT CHANGED, and why it is worth a term. This used to charge only for
+    # SPAN and FINGER COUNT, which cannot tell a real tenth from a cluster of
+    # the same width: C-E-G-C is one wide thumb reach and four close fingers,
+    # while C-G#-E is three minor sixths and no hand can shape it, and both
+    # span twelve to sixteen semitones. output/playability.py's hand model
+    # carries the distinction - one large gap allowed, the rest close - and
+    # this is the natural place to spend it: choosing WHERE the staff splits
+    # is exactly the decision that can turn an unplayable shape into two
+    # playable ones.
+    #
+    # Graded, not binary. Viterbi needs a cost surface it can slide down; a
+    # hard "impossible" would flatten every bad boundary to the same value and
+    # leave the search choosing between them at random.
     def emit(w: int, b: int) -> float:
         cost = 0.0
         for group in ([p for p in win_pitches[w] if p < b],
                       [p for p in win_pitches[w] if p >= b]):
             if not group:
                 continue
-            span = max(group) - min(group)
+            uniq = sorted(set(group))
+            span = uniq[-1] - uniq[0]
             cost += max(0, span - span_max) * 1.0
-            cost += max(0, len(set(group)) - fingers_max) * 3.0
+            cost += max(0, len(uniq) - fingers_max) * 3.0
+            # The shape term: every adjacent-finger gap except the widest one
+            # (the thumb's) has to be small. Charged per semitone over, so a
+            # boundary that breaks one bad shape into two good ones wins.
+            gaps = [uniq[i + 1] - uniq[i] for i in range(len(uniq) - 1)]
+            if len(gaps) > 1:
+                for gap in sorted(gaps)[:-1]:
+                    cost += max(0, gap - inner_gap_max) * 1.5
         return cost
 
     inf = float("inf")
