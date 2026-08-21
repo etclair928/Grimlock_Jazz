@@ -22,11 +22,29 @@ if args.family:
         time_signature=d["time_signature"], key=d["key"],
         use_voices=False, use_consolidation=True, ratio_family=d["ratio_family"])
 else:
+    # THE GRID AND THE BAR ORIGIN MATTER, and leaving them out made this tool
+    # quietly produce a DIFFERENT score from the one the pipeline ships. On
+    # Chopin the pipeline's own file had 2310 onsets and this tool's re-export
+    # of its own pkl had 2602 - so every notation number measured through here
+    # was measured on a path the pipeline does not use. Intermediates written
+    # before 2026-08-21 do not carry these keys; the warning below says so
+    # rather than silently reverting to the old, divergent behaviour.
+    from core.musical_time import MusicalTime
     from output.notation_score import build_routed_score
+
+    beats = d.get("beat_times_ms")
+    musical_time = MusicalTime.from_beats(beats) if beats else None
+    bar_origin_ms = d.get("bar_origin_ms")
+    if musical_time is None:
+        print("  WARNING: this intermediate predates beat_times_ms/bar_origin_ms. "
+              "The re-export will use a flat clock from the first note and will "
+              "NOT match what the pipeline engraves. Re-run to compare fairly.")
+
     score = build_routed_score(
         d["all_notes"], d["annotations"], tempo_bpm=d["tempo_bpm"],
         time_signature=d["time_signature"], key=d["key"],
-        use_consolidation=True, ratio_family=d["ratio_family"])
+        use_consolidation=True, ratio_family=d["ratio_family"],
+        musical_time=musical_time, bar_origin_ms=bar_origin_ms)
 
 export_musicxml(score, args.out)
 print(f"parts={len(score.parts)} notes={score.total_notes} -> {args.out}")

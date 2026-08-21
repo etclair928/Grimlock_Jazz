@@ -1488,6 +1488,23 @@ def transcribe_file(
     if save_intermediate_path is not None:
         try:
             import pickle
+            # WHAT AN INTERMEDIATE HAS TO CARRY, and why this grew.
+            #
+            # The point of saving one is that notation can be rebuilt from it
+            # in seconds instead of re-running the hour. That is only true if
+            # it holds everything the ENGRAVER needs - and it did not. Without
+            # the beat grid and the bar origin, a re-export builds its score on
+            # a flat isochronous clock starting at the first note, which is a
+            # different engraving of the same notes: measured on Chopin, the
+            # pipeline's own file carried 2310 onsets and a re-export of its
+            # own pkl carried 2602. Two paths, two answers, and every "0
+            # off-grid onsets" measured on a re-export was measuring the wrong
+            # one.
+            #
+            # beat_times_ms is the tracked grid MusicalTime is built from;
+            # bar_origin_ms is where bar 1 starts, which is what keeps a pickup
+            # from displacing every barline in the piece.
+            _dbs = tempo_resolution.tempo_meter.downbeat_times_ms
             payload = {
                 "all_notes": all_notes,
                 "annotations": annotations,
@@ -1495,6 +1512,9 @@ def transcribe_file(
                 "time_signature": (meter_resolution.numerator, meter_resolution.denominator),
                 "key": findings.key,
                 "ratio_family": ratio_family,
+                "beat_times_ms": tuple(tempo_resolution.tempo_meter.beat_times_ms or ()),
+                "downbeat_times_ms": tuple(_dbs or ()),
+                "bar_origin_ms": (_dbs[0] if _dbs else None),
             }
             with open(str(save_intermediate_path), "wb") as fh:
                 pickle.dump(payload, fh)
