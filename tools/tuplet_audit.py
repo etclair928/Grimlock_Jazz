@@ -67,10 +67,20 @@ warnings.filterwarnings("ignore")
 _LEGAL_NORMALS = frozenset({1, 2, 3, 4, 6, 8, 12, 16})
 
 
-def audit(path: str) -> bool:
+def measure_tuplets(path: str = None, score=None) -> dict:
+    """The audit's FINDINGS, as data. Printing lives in `audit` below.
+
+    Split out because app/diagnostics.py needs these numbers and the first
+    version of that module reimplemented the rules instead - reporting 44
+    off-beat groups on a page that has 9, because it demanded a whole-beat
+    anchor and used offset-within-part rather than beat-within-measure. The
+    edition disproves the whole-beat rule (see the header), so the naive
+    version was measuring its own mistake. One implementation, two presenters.
+    """
     from music21 import converter
 
-    score = converter.parse(path)
+    if score is None:
+        score = converter.parse(path)
     ratios: Counter = Counter()
     crossings = []
     unanchored = []
@@ -110,13 +120,30 @@ def audit(path: str) -> bool:
                 if is_group_start and (beat.denominator & (beat.denominator - 1)):
                     unanchored.append((measure.number, float(el.beat)))
 
+    junk = {r: c for r, c in ratios.items()
+            if int(r.split(":")[1]) not in _LEGAL_NORMALS}
+    return {
+        "total_notes": total_notes, "tuplet_notes": tuplet_notes,
+        "ratios": dict(ratios), "junk_ratios": junk,
+        "junk_count": sum(junk.values()),
+        "crossings": crossings, "unanchored": unanchored,
+        "ok": not junk and not crossings,
+    }
+
+
+def audit(path: str) -> bool:
+    """The CLI presenter. Delegates every rule to measure_tuplets."""
+    m = measure_tuplets(path)
+    total_notes, tuplet_notes = m["total_notes"], m["tuplet_notes"]
+    ratios, crossings, unanchored = m["ratios"], m["crossings"], m["unanchored"]
+    junk = list(m["junk_ratios"])
+
     name = os.path.basename(path)
     pct = 100.0 * tuplet_notes / max(total_notes, 1)
     print(f"\n{name}")
     print(f"  notes {total_notes}   tuplet notes {tuplet_notes} ({pct:.1f}%)")
-    print(f"  ratios: {dict(ratios.most_common()) if ratios else 'none'}")
+    print(f"  ratios: {ratios if ratios else 'none'}")
 
-    junk = [r for r in ratios if int(r.split(':')[1]) not in _LEGAL_NORMALS]
     ok = True
     if junk:
         print(f"  FAIL  un-notatable ratios present: {junk}")

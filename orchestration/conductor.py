@@ -34,7 +34,8 @@ from core import TempoMeter
 from separation_engine import separate
 from separation_engine import merge_harmonic_stems as _merge_harmonic_stems
 from separation_engine import load_cached_separation as _load_cached_separation
-from separation_engine import detect_solo_instrument, SOLO_PIANO
+from separation_engine import (detect_solo_instrument, SOLO_PIANO, SOLO_GUITAR,
+                               ENSEMBLE)
 from pitch_engine import (
     transcribe_basic_pitch, transcribe_basic_pitch_with_posteriorgram,
     transcribe_crepe_bass, BASIC_PITCH_SAMPLE_RATE, continuous_f0, make_f0_sampler,
@@ -152,6 +153,16 @@ def transcribe_file(
         guided_tempo_bpm: Optional[float] = None,
         guided_time_signature: Optional[Tuple[int, int]] = None,
         guided_key: Optional[str] = None,
+        # GUIDED SEPARATION (§2.7, same law as guided tempo/meter/key): the
+        # user's knowledge of what is playing is a hard lock, not a vote.
+        #   None           - auto: the solo probe decides
+        #   "solo_piano"   - skip Demucs, the master audio IS the piano stem
+        #   "solo_guitar"  - skip Demucs, the master audio IS the guitar stem
+        #   "ensemble"     - separate, never skip, whatever the probe thinks
+        # The vocabulary is deliberately the SAME words the probe returns, so
+        # a user overriding it is speaking the machine's own language rather
+        # than a parallel set of flags.
+        guided_separation: Optional[str] = None,
         routed_layout: bool = True,
         save_intermediate_path: Optional[Union[str, Path]] = None,
         university_mode: Union[str, "UniversityMode"] = "off",
@@ -162,6 +173,12 @@ def transcribe_file(
         # one it risks - but it is a switch, so a caller who wants Demucs on
         # a solo record can still have it.
         skip_separation_when_solo: bool = True,
+        # A MusicBox to log into, instead of the private one built below.
+        # Exists so a front end can hand in `MusicBox(log_path=..., buffer_size=1)`
+        # and TAIL the ledger while the run proceeds: every decision lands on
+        # disk the moment it is made, so live progress is the engine's own
+        # audit trail rather than a progress bar invented alongside it.
+        music_box: Optional[MusicBox] = None,
         university_corpus_path: Optional[Union[str, Path]] = None,
 ) -> PipelineResult:
     start_time = time.time()
@@ -169,7 +186,7 @@ def transcribe_file(
     output_midi_path = str(output_midi_path)
 
     engine = AudioEngine()
-    music_box = MusicBox()
+    music_box = music_box if music_box is not None else MusicBox()
     findings = MusicalFindingsMap()
     annotations = AnnotationStore()
 
@@ -220,7 +237,38 @@ def transcribe_file(
     # ONLY a confident solo verdict. The asymmetry is the whole design: a
     # wrong "solo" silently discards real instruments and nothing downstream
     # could notice, while a wrong "ensemble" costs only time.
-    if separation is None and skip_separation_when_solo:
+    # GUIDED SEPARATION is a hard lock and, like guided tempo, it SKIPS the
+    # detector rather than out-voting it - there is no point paying for a
+    # verdict that cannot change the outcome.
+    if separation is None and guided_separation in (SOLO_PIANO, SOLO_GUITAR):
+        stem = StemType.PIANO if guided_separation == SOLO_PIANO else StemType.GUITAR
+        separation = Separation(
+            stems={stem: master_track},
+            model_used=f"guided({guided_separation})",
+            confidence=1.0, separation_time_seconds=0.0,
+        )
+        music_box.log_decision(
+            stage_name="separation_engine", decision_type="separation_guided",
+            before_state={"model": separation_model},
+            after_state={"stem": stem.value},
+            reasoning=(f"Separation HARD-LOCKED by the user to {guided_separation} "
+                       f"(guided mode, §2.7). Demucs skipped and the solo probe "
+                       f"NOT run - a verdict that cannot change the outcome is "
+                       f"not worth computing. The master audio is the "
+                       f"{stem.value} stem."),
+            reversible=False,
+        )
+    elif separation is None and guided_separation == ENSEMBLE:
+        music_box.log_decision(
+            stage_name="separation_engine", decision_type="separation_guided",
+            before_state={}, after_state={"forced": "separate"},
+            reasoning=("Separation HARD-LOCKED by the user to ensemble (guided "
+                       "mode, §2.7): Demucs runs and the solo fast path is not "
+                       "consulted, however the probe would have read the audio."),
+            reversible=False,
+        )
+
+    if separation is None and guided_separation is None and skip_separation_when_solo:
         solo = detect_solo_instrument(engine, master_track)
         music_box.log_decision(
             stage_name="separation_engine", decision_type="solo_probe",
