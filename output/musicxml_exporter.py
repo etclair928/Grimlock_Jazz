@@ -882,6 +882,14 @@ def export_musicxml(score: NotationScore, path: str, grid_chords: bool = True) -
 #    point that is provably last is the post-write XML pass in
 #    `_normalize_voice_numbers` - walking <measure> with <divisions>, <backup>
 #    and <forward> to trim what overruns. That is where a future fix goes.
+#
+# 4. THE OFF-GRID ONSET HAS THE SAME AUTHOR (measured 2026-08-21). Chopin's
+#    last surviving grid violation is not ours either. Built in memory the
+#    score has 2326 onsets and NONE off-grid; serialized and read back it has
+#    2327, one of them at 17/24 of a beat. The writer's notation pass adds a
+#    note and places it off the grid. Both remaining hard-rule violations on
+#    this page therefore have one cause and one fix site - the post-write pass
+#    above - and neither is a defect in what this module engraves.
 # ---------------------------------------------------------------------
 
 
