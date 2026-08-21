@@ -120,14 +120,103 @@ def _boundaries_between(start: Fraction, end: Fraction,
     return out
 
 
+# Durations a single notehead can carry, in beats: powers of two, their dotted
+# forms, and the same series scaled into the thirds family for notes that live
+# on a ternary grid. Anything not here needs a tie, whatever the metric
+# hierarchy thinks.
+# The plain note values, in beats: 8 down to a 32nd.
+_BASE_VALUES: Tuple[Fraction, ...] = (
+    Fraction(8), Fraction(4), Fraction(2), Fraction(1),
+    Fraction(1, 2), Fraction(1, 4), Fraction(1, 8), Fraction(1, 16), Fraction(1, 32),
+)
+
+# What a SINGLE notehead can carry: those values, their dotted forms (x3/2),
+# and the same series inside a triplet (x2/3, which is how 1/3, 2/3, 1/6 and
+# 1/12 arise). Anything outside this needs a tie, whatever the metric
+# hierarchy would like.
+# Kept as two FAMILIES rather than one pool, because which family a remainder
+# is decomposed in decides whether the result reads. Five twelfths taken from
+# the combined pool greedily gives 3/8 + 1/24 - a binary note tied to a
+# twenty-fourth, which is both unreadable and the exact k/24 scrap this
+# codebase spent a session removing. Taken in its own family it gives
+# 1/3 + 1/12, a triplet quarter tied to a triplet thirty-second, which is
+# what a copyist writes.
+_BINARY_SHAPES: Tuple[Fraction, ...] = tuple(sorted(
+    {v for v in _BASE_VALUES} | {v * Fraction(3, 2) for v in _BASE_VALUES},
+    reverse=True))
+_TERNARY_SHAPES: Tuple[Fraction, ...] = tuple(sorted(
+    {v * Fraction(2, 3) for v in _BASE_VALUES}, reverse=True))
+_NOTE_SHAPES: Tuple[Fraction, ...] = tuple(sorted(
+    set(_BINARY_SHAPES) | set(_TERNARY_SHAPES), reverse=True))
+
+
+def _shapes_for(value: Fraction) -> Tuple[Fraction, ...]:
+    """A remainder is written in the family it belongs to - thirds with
+    thirds, binary with binary."""
+    return _TERNARY_SHAPES if value.denominator % 3 == 0 else _BINARY_SHAPES
+
+
+def _notatable_chain(start: Fraction, duration: Fraction
+                     ) -> List[Tuple[Fraction, Fraction]]:
+    """Break one segment into pieces a notehead can actually carry.
+
+    WHY THIS IS NEEDED HERE. This module's contract is that it returns the tied
+    chain the page should show - so every link has to be writable, and it was
+    returning links that were not. Measured on Chopin: a note of 3/4 starting at
+    560/3 (a ternary onset carrying a binary duration) was cut at the beat line
+    into 1/3 + 5/12, and no notehead expresses five twelfths. music21 then
+    invented a 6:5 bracket to reconcile it, which is where fourteen of the
+    page's junk ratios came from.
+
+    Greedy largest-first WITHIN ONE FAMILY: the longest writable value that
+    FITS, then the remainder, tied. Staying in the family is what makes the
+    result readable - see _shapes_for.
+
+    NOTHING IS EVER LENGTHENED TO MAKE IT FIT (user directive, 2026-08-21: "do
+    not force rhythmic values into spaces they won't or can't possibly fit. If
+    it doesn't fit then it must be something else that can actually fit"). A
+    first draft of this function folded a sub-notatable residue into the
+    previous piece, which is the same error as notatable_at_most returning a
+    value longer than its own ceiling - the bug that produced k/24 in the first
+    place. Growing a note to absorb a leftover pushes the next onset, and a
+    ceiling that can be exceeded is not a ceiling.
+
+    So a residue smaller than the shortest writable value is DROPPED and the
+    chain ends fractionally early. Shortening can never overlap the next note,
+    cross a barline, or displace anything; at the sizes involved - under a
+    twenty-fourth of a beat, 36ms at 70bpm - it is inaudible and unwritable
+    either way. The chain therefore sums to AT MOST the original duration,
+    never more.
+    """
+    out: List[Tuple[Fraction, Fraction]] = []
+    cursor, remaining = start, duration
+    shapes = _shapes_for(duration)
+    guard = 0
+    while remaining > 0 and guard < 16:
+        guard += 1
+        piece = next((v for v in shapes if v <= remaining), None)
+        if piece is None:
+            # Nothing writable fits. Drop the residue rather than grow the
+            # note to swallow it - see the docstring.
+            if not out:
+                out.append((cursor, remaining))   # nothing emitted yet: keep it
+            break
+        out.append((cursor, piece))
+        cursor += piece
+        remaining -= piece
+    return out or [(start, duration)]
+
+
 def split_for_hierarchy(start: Fraction, duration: Fraction,
                         numerator: int = 4, denominator: int = 4,
                         is_tuplet: bool = False) -> List[Tuple[Fraction, Fraction]]:
     """Split one sounding note into the tied chain the page should show.
 
     Returns [(start, duration), ...] in beat units, contiguous and summing to
-    the original duration. A single-element result means the note already
-    respects the hierarchy and is written as-is.
+    AT MOST the original duration - never more. A tail shorter than the
+    shortest writable note value is dropped rather than absorbed by growing its
+    neighbour; see _notatable_chain. A single-element result means the note
+    already respects the hierarchy and is written as-is.
 
     A note may cross a boundary only if it starts on a position at least as
     strong as that boundary (see the module header). Tuplets are never split:
@@ -164,7 +253,13 @@ def split_for_hierarchy(start: Fraction, duration: Fraction,
         segments.append((cursor, cut - cursor))
         remaining = end - cut
         cursor = cut
-    return segments
+
+    # Every link in the chain must be writable. The hierarchy decides WHERE to
+    # cut; this decides whether what it produced can be drawn.
+    chain: List[Tuple[Fraction, Fraction]] = []
+    for seg_start, seg_dur in segments:
+        chain.extend(_notatable_chain(seg_start, seg_dur))
+    return chain
 
 
 def respects_hierarchy(start: Fraction, duration: Fraction,
