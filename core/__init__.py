@@ -26,6 +26,11 @@ from core.tempo_types import TempoMeter
 from core.musical_time import MusicalTime
 from core.separation_types import Separation
 from core.music_box import MusicBox, ForensicRecord
+from core.window_pane import (
+    WindowPane, PaneEvent,
+    EVENT_STAGE_START, EVENT_STAGE_END, EVENT_WITNESS, EVENT_CONTRADICTION,
+    EVENT_TEMPO_VERDICT,
+)
 from core.musical_findings_map import MusicalFindingsMap
 
 __all__ = [
@@ -41,5 +46,12 @@ __all__ = [
     "Separation",
     "MusicBox",
     "ForensicRecord",
+    "WindowPane",
+    "PaneEvent",
+    "EVENT_STAGE_START",
+    "EVENT_STAGE_END",
+    "EVENT_WITNESS",
+    "EVENT_CONTRADICTION",
+    "EVENT_TEMPO_VERDICT",
     "MusicalFindingsMap",
 ]

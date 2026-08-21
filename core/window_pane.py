@@ -145,6 +145,15 @@ class WindowPane:
             self,
             capacity: int = 2000,
             webhook_url: Optional[str] = None,
+            # A JSONL sink, one event per line, for a viewer in ANOTHER
+            # PROCESS. The ring is in-memory and the webhook needs an HTTP
+            # listener; a desktop front end that runs the pipeline as a
+            # subprocess (so a Demucs OOM cannot take the window with it) can
+            # do neither, and tailing a file is the cheapest thing that works.
+            # Deliberately mirrors MusicBox(log_path=...) - the difference
+            # stays what it always was: Music_Box keeps EVERYTHING forever,
+            # this keeps a bounded window for someone watching right now.
+            stream_path: Optional[Path] = None,
             webhook_queue_size: int = 1000,
             webhook_timeout_s: float = 2.0,
             enable_memory_sampling: bool = False,
@@ -169,7 +178,20 @@ class WindowPane:
         self._webhook_sent = 0
         self._webhook_failed = 0
         self._webhook_dropped = 0     # dropped because the queue was full
+        self._stream_failed = 0       # lines a stream sink could not write
         self._stop_flag = threading.Event()
+
+        # --- JSONL stream sink: opened once, line-buffered, appended to ---
+        # Line buffering is the whole point: a reader tailing this file needs
+        # each event to land as it happens, not when a 4KB buffer fills.
+        self._stream = None
+        if stream_path is not None:
+            try:
+                Path(stream_path).parent.mkdir(parents=True, exist_ok=True)
+                self._stream = open(str(stream_path), "a", encoding="utf-8",
+                                    buffering=1)
+            except Exception:
+                self._stream = None   # a sink that cannot open is not fatal
         if webhook_url:
             self._webhook_q = queue.Queue(maxsize=webhook_queue_size)
             self._worker = threading.Thread(
@@ -213,6 +235,14 @@ class WindowPane:
                     self._webhook_q.put_nowait(event)
                 except queue.Full:
                     self._webhook_dropped += 1
+            # Same rule as the webhook: outside the lock, and a failure is
+            # counted rather than raised. Telemetry never takes down the run.
+            if self._stream is not None:
+                try:
+                    self._stream.write(
+                        json.dumps(event.to_dict(), default=str) + chr(10))
+                except Exception:
+                    self._stream_failed += 1
         except Exception:
             # A telemetry sink must never take down the run it observes.
             pass
@@ -281,6 +311,7 @@ class WindowPane:
             "webhook_sent": self._webhook_sent,
             "webhook_failed": self._webhook_failed,
             "webhook_dropped": self._webhook_dropped,
+            "stream_failed": self._stream_failed,
         }
 
     # ------------------------------------------------------------- lifecycle
@@ -294,6 +325,12 @@ class WindowPane:
             self._worker.join(timeout=max(self._webhook_timeout_s * 2, 3.0))
         if self._mem_thread is not None:
             self._mem_thread.join(timeout=max(self._mem_interval_s * 2, 3.0))
+        if self._stream is not None:
+            try:
+                self._stream.close()
+            except Exception:
+                pass
+            self._stream = None
         if replay_path is not None:
             return self._write_replay(Path(replay_path))
         return None

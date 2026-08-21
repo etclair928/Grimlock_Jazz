@@ -1,8 +1,8 @@
 # Grimlock Jazz 6.0 — Front End Design
 
-Status: **design, not built.** Decisions below were taken with the user on
-2026-08-20. Nothing here has shipped; this document exists to be argued with
-before any of it is written.
+Status: **Transcribe mode built.** Decisions below were taken with the user on
+2026-08-20; slices 1-3 shipped on 2026-08-21. Lab mode (slice 4) and the note
+table (slice 5) are still design.
 
 ---
 
@@ -177,11 +177,32 @@ it.
   read .pkl for diagnostics
 ```
 
-**Live progress needs no new plumbing.** `MusicBox` already appends
-`ForensicRecord`s and flushes them to JSONL. Construct it with
-`buffer_size=1` and every decision lands on disk the moment it is made; the UI
-tails the file. The stage feed is then not a progress bar someone invented —
-it is the engine's own audit trail, shown live.
+**Live progress is Window Pane's job, and this is what it was staged for.**
+`core/window_pane.py` has carried this note since it was written: *"STATUS:
+STAGED, NOT DEAD… its consumer is the live dashboard / GUI frontend, which
+does not exist yet… the resolution is 'build the frontend,' not 'delete
+this.'"* `app/runner.py` is that consumer.
+
+An earlier draft of this document routed the feed through the MusicBox JSONL
+instead. That would have worked and it was wrong: Music_Box is the *forensic*
+sink — everything, forever, for Grimlock University and backward traceability
+— and Window_Pane is the *live* one, bounded, for whoever is watching now.
+Using the forensic log for a live purpose collapses a distinction Core draws
+deliberately.
+
+Window Pane needed one addition to serve a subprocess: a **JSONL stream sink**,
+mirroring its own webhook sink and `MusicBox(log_path=...)`. The in-memory ring
+is unreadable across a process boundary, the webhook would need the UI to run
+an HTTP listener, and `stop(replay_path)` only fires at the end. The sink is
+line-buffered, never raises, and counts its own failures.
+
+**Adoption is a tee, not forty-five edits.** The obvious wiring — sprinkling
+`pane.stage(...)` through the conductor — would touch a load-bearing function
+in forty-five places and make a Core ambient service something the pipeline has
+to remember to call. Instead `app/runner.PaneMusicBox` subclasses MusicBox,
+records forensically exactly as before, and mirrors each decision to the pane.
+The conductor is untouched; the feed carries every decision it makes,
+*including the `reasoning` string*, which is the part worth watching.
 
 **Cancellation is killing the subprocess.** Honest and simple. Partial output
 is discarded rather than presented, because a half-finished transcription that
