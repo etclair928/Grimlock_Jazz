@@ -292,7 +292,12 @@ def diagnose(pkl_path: Optional[str] = None,
         total, off, offenders = check_onset_grid(score)
         report.add("offgrid_onsets", PASS if off == 0 else FAIL, off, reference=0,
                    detail=f"HARD RULE: onsets sit on legal beat positions "
-                          f"({total} onsets checked)"
+                          f"({total} onsets checked). Measured on Chopin, what "
+                          f"the engraver BUILDS is clean - 2326 onsets, none "
+                          f"off-grid - and music21's serialization pass then "
+                          f"adds a note and places it off-grid (2327, one at "
+                          f"17/24). A count of 1 here is that artifact; a "
+                          f"larger count is ours"
                           + (f" | {offenders}" if offenders else ""))
 
         tup = check_tuplets(musicxml_path)
