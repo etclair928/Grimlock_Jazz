@@ -101,6 +101,16 @@
 # whether one pianist can play the whole band, which is a meaningless
 # question with a confident-looking answer. Pass one instrument's notes.
 #
+# THAT WARNING WAS EARNED THE SECOND TIME TOO (2026-08-21). A diagnostic
+# written to evaluate the register-split shape term ran assign_hands over
+# EVERY part of a five-part ensemble score, bass and vocal lines included -
+# parts no pianist plays and which notation_score never routes to a grand
+# staff. It reported 14 unplayable chords on each of Hopeful and HRV. Scoped
+# to the parts that actually get a grand staff (other/guitar/piano) the true
+# figures are 6 and 3. More than half of that "unplayability" was the
+# measurement asking the meaningless question, in the exact shape this
+# paragraph describes.
+#
 # STILL A DIAGNOSTIC. Pure - tuples in, a report out, no output changed. It
 # is built to become the objective function the register-split reducer
 # optimizes against (§11.3.3) without dragging music21 or audio into core.

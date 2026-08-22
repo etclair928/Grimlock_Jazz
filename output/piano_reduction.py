@@ -53,6 +53,23 @@ FINGERS_PER_HAND = 5
 # 17-semitone default: that default exists so a positive means "physically
 # impossible", while this decides where a staff should split, which is a
 # question about what reads well, not about what is barely possible.
+#
+# MEASURED, AND IT EARNS NOTHING YET (2026-08-21). Kept because it is correct
+# and cheap, labelled because it is unproven - nobody should read this term as
+# doing work it has not been shown to do:
+#
+#     grand-staff parts only    notes moved    unplayable chords off -> on
+#     Chopin                          3           3 of 406 -> 3 of 406
+#     Hopeful                         0           6 of 212 -> 6 of 212
+#     HRV                             0           3 of 299 -> 3 of 299
+#
+# It is NOT dead code - the gap penalty charges on 5.2% of candidate hands on
+# Hopeful and 11.1% on HRV, so it does shape the cost surface. It changes no
+# outcome because every surviving failure is a SPAN failure, and no choice of
+# split point fixes a chord that is simply wider than one hand. The metric is
+# also coarse: it counts chords flipping from impossible to possible, and
+# cannot see a hand merely becoming easier to play, which is the only thing
+# this term plausibly does.
 INNER_GAP_MAX_SEMITONES = 5
 
 # Register-split Viterbi search grid + hysteresis. The switch penalty is the
