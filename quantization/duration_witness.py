@@ -61,8 +61,23 @@ DEFAULT_TOLERANCE_FRACTION = 0.08  # 8% of the beat
 # exporter is downstream of quantization - it had its own private copy of the
 # same numbers, which is exactly the duplicated-fact disease §9 exists to
 # remove. output/musicxml_exporter.py imports these.
+# THE FLOOR IS A SIXTEENTH (user directive, 2026-08-22): "I NEVER NEVER NEVER
+# WANT TO SEE 32nd or 64th notes again", and the reason it is a rule rather
+# than a preference: "If you are writing divisions of rhythms like that CHECK
+# the Tempo and Meter again because something is off."
+#
+# That is the correct causal reading. A 32nd note is almost never what a
+# player reads; it is what an engraver produces when the beat is in the wrong
+# place or the tempo is out by a factor of two, at which point every eighth
+# becomes a sixteenth and every sixteenth a thirty-second. Leaving the finer
+# values available lets a GRID error hide as a notation choice. Removing them
+# forces it to surface as a bad fit, which is information.
+#
+# In beats, so 1.0 is one beat: 0.25 is a sixteenth, and there is nothing
+# below it. Ornaments and grace notes are a separate mechanism and are not
+# durations in this vocabulary.
 NOTATABLE_BEAT_VALUES: Tuple[float, ...] = (
-    0.125, 0.25, 0.375, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0,
+    0.25, 0.375, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0,
 )
 # THE SHORT VALUES WERE MISSING, and that omission is where k/24 came from.
 # This series used to start at 1/3 - a triplet EIGHTH - so a triplet sixteenth

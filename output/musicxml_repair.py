@@ -181,8 +181,9 @@ def _unambiguous_rest_pieces(duration: int, divisions: int
     original is left alone rather than approximated, because a rest of the
     wrong length is worse than an ambiguous one."""
     shapes: List[Tuple[str, float, int]] = []
+    # No 32nd rests either - same rule as notes.
     for name, quarters in (("half", 2.0), ("quarter", 1.0), ("eighth", 0.5),
-                           ("16th", 0.25), ("32nd", 0.125)):
+                           ("16th", 0.25)):
         shapes.append((name, quarters * 1.5, 1))     # dotted
         shapes.append((name, quarters, 0))
     shapes.sort(key=lambda s: -s[1])

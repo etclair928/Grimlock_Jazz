@@ -152,7 +152,32 @@ _BEAT_VOCABULARY: Tuple[BeatFilling, ...] = (
 # in _best_alignment), never by independent rounding - two onsets must not
 # collapse onto one slot and their order must be preserved, or the reading is
 # not a rhythm.
-DIVISORS: Tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12)
+# THE VOCABULARY, AND WHY IT IS SHORT (user directive, 2026-08-22):
+#
+#   "anytime you create weird tuplets... the transcription is wrong and OFF
+#    and the Meter and grid is off. There should never be tuplets of 5 or 12
+#    or anything like that. ENFORCE BEAT HIERARCHY"
+#
+# The evidence agrees, and it is damning. With 5, 7, 9, 10 and 12 available,
+# a run of Chopin's Nocturne Op.62 No.1 read 146 of its 314 tuplet notes as
+# NONUPLETS AND 10-TUPLETS. Nobody writes that; a nocturne has ornamental runs,
+# not bars divided into nine. What those divisors actually did was let the
+# beat fitter explain onsets that did not fit the grid - a quintuplet is what
+# you get when the beat is in the wrong place and the fitter is allowed enough
+# rope to cover it. The weird tuplet is not the disease, it is the SYMPTOM,
+# and leaving it available lets a grid error hide as a notation choice instead
+# of surfacing as a bad fit.
+#
+# So: binary subdivisions, the triplet, and the sextuplet. 1/2/4/8 are not
+# tuplets at all (_normal_count(d) == d, so no bracket is drawn); 3 and 6 are
+# the two every reader knows on sight. A beat that fits none of these is
+# SUPPOSED to fit none of them - that is the fitter reporting a poor fit, which
+# is information, where a quintuplet was a fabrication.
+# 8 is gone too: eight parts of a beat is thirty-second notes, and those are
+# forbidden outright (see NOTATABLE_BEAT_VALUES). What remains writes with
+# eighth and sixteenth noteheads only - 3 gives eighth-note triplets, 6 gives
+# sixteenth triplets, 4 gives plain sixteenths.
+DIVISORS: Tuple[int, ...] = (1, 2, 3, 4, 6)
 _BINARY_DIVISIONS = frozenset({1, 2, 4, 8})
 
 # Reading cost, in the same currency as the old hand-authored table (1 per

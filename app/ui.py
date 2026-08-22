@@ -44,6 +44,9 @@ from typing import Optional
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.diagnostics import FAIL, INFO, PASS, diagnose               # noqa: E402
+from app.progress import (                                           # noqa: E402
+    STAGE_ORDER, RunProgress, format_elapsed,
+)
 from app.runner import JAZZ_ROOT, RunConfig, TranscriptionRunner     # noqa: E402
 
 POLL_MS = 300
@@ -64,8 +67,8 @@ class TranscribeWindow(ttk.Frame):
         master.columnconfigure(0, weight=1)
         master.rowconfigure(0, weight=1)
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(4, weight=3)
-        self.rowconfigure(6, weight=2)
+        self.rowconfigure(5, weight=3)
+        self.rowconfigure(7, weight=2)
 
         self.audio_path = tk.StringVar()
         self.out_stem = tk.StringVar()
@@ -81,16 +84,18 @@ class TranscribeWindow(ttk.Frame):
 
         self._probe = None
         self._runner: Optional[TranscriptionRunner] = None
+        self._progress: Optional[RunProgress] = None
 
         self._build_source()
         self._build_probe()
         self._build_guided()
         self._build_actions()
+        self._build_progress()
         self._build_feed()
         self._build_health()
 
         ttk.Label(self, textvariable=self.status_text,
-                  foreground="#555").grid(row=7, column=0, sticky="w", pady=(6, 0))
+                  foreground="#555").grid(row=8, column=0, sticky="w", pady=(6, 0))
 
     # ------------------------------------------------------------- widgets
     def _build_source(self) -> None:
@@ -147,9 +152,66 @@ class TranscribeWindow(ttk.Frame):
                    command=self._open_score).pack(side="left", padx=6)
         ttk.Button(bar, text="Show folder", command=self._open_folder).pack(side="left")
 
+    def _build_progress(self) -> None:
+        """The clock, the bar and the stage chips.
+
+        THE CLOCK IS THE LOAD-BEARING PART. It runs off wall time on its own
+        one-second timer, so it keeps moving through the long silences where
+        the heavy models report nothing - which is most of a run. The bar
+        counts MILESTONES REACHED and is labelled as that rather than as a
+        time estimate: milestones are not evenly spaced in time, and a bar
+        implying they were would be lying for twenty minutes at a stretch.
+        """
+        box = ttk.LabelFrame(self, text="4  Progress", padding=8)
+        box.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+        box.columnconfigure(0, weight=1)
+
+        self.clock_text = tk.StringVar(value="not started")
+        ttk.Label(box, textvariable=self.clock_text,
+                  font=("TkDefaultFont", 10, "bold"),
+                  wraplength=1000, justify="left").grid(row=0, column=0, sticky="w")
+
+        self.bar = ttk.Progressbar(box, mode="determinate", maximum=100.0)
+        self.bar.grid(row=1, column=0, sticky="ew", pady=(6, 6))
+
+        chips = ttk.Frame(box)
+        chips.grid(row=2, column=0, sticky="ew")
+        self.stage_labels = {}
+        for i, name in enumerate(STAGE_ORDER):
+            label = ttk.Label(chips, text=name, foreground="#999999")
+            label.grid(row=0, column=i, padx=(0 if i == 0 else 10, 0))
+            self.stage_labels[name] = label
+
+        self.stage_detail = tk.StringVar(value="")
+        ttk.Label(box, textvariable=self.stage_detail, foreground="#555555",
+                  wraplength=1000, justify="left").grid(
+            row=3, column=0, sticky="w", pady=(6, 0))
+
+    def _tick(self) -> None:
+        """Once a second, whatever the pipeline is doing."""
+        progress = self._progress
+        if progress is None:
+            return
+        self.clock_text.set(progress.headline())
+        self.bar["value"] = 100.0 * progress.fraction
+        for name, label in self.stage_labels.items():
+            state = progress.stages.get(name)
+            if state is None or state.started is None:
+                label.configure(foreground="#999999")
+            elif name == progress.current_stage and not progress.finished:
+                label.configure(foreground="#00aa44")
+            else:
+                label.configure(foreground="#003366")
+        seen = [n + " " + format_elapsed(st.elapsed)
+                for n, st in progress.stages.items()
+                if st.started is not None and st.decisions]
+        self.stage_detail.set("    ".join(seen))
+        if not progress.finished:
+            self.after(1000, self._tick)
+
     def _build_feed(self) -> None:
-        box = ttk.LabelFrame(self, text="4  What the engine is doing", padding=6)
-        box.grid(row=4, column=0, sticky="nsew", pady=(10, 0))
+        box = ttk.LabelFrame(self, text="5  What the engine is doing", padding=6)
+        box.grid(row=5, column=0, sticky="nsew", pady=(10, 0))
         box.columnconfigure(0, weight=1)
         box.rowconfigure(0, weight=1)
         self.feed = tk.Text(box, height=12, wrap="word", state="disabled")
@@ -161,8 +223,8 @@ class TranscribeWindow(ttk.Frame):
         self.feed.tag_configure("why", foreground="#555")
 
     def _build_health(self) -> None:
-        box = ttk.LabelFrame(self, text="5  Is this transcription trustworthy?", padding=6)
-        box.grid(row=6, column=0, sticky="nsew", pady=(10, 0))
+        box = ttk.LabelFrame(self, text="6  Is this transcription trustworthy?", padding=6)
+        box.grid(row=7, column=0, sticky="nsew", pady=(10, 0))
         box.columnconfigure(0, weight=1)
         box.rowconfigure(0, weight=1)
         cols = ("check", "value", "reference", "detail")
@@ -284,6 +346,8 @@ class TranscribeWindow(ttk.Frame):
 
         self._runner = TranscriptionRunner(config)
         self._runner.start(python_executable=sys.executable)
+        self._progress = RunProgress()
+        self._tick()
         self.run_button.configure(state="disabled")
         self.cancel_button.configure(state="normal")
         self.status_text.set("running - this takes 30-60 minutes unless separation is skipped")
@@ -294,11 +358,16 @@ class TranscribeWindow(ttk.Frame):
         if runner is None:
             return
         for event in runner.poll():
+            if self._progress is not None:
+                self._progress.observe(event)
             self._show_event(event)
         if runner.status.running:
             self.after(POLL_MS, self._pump)
             return
 
+        if self._progress is not None:
+            self._progress.finished = True
+            self._tick()
         self.run_button.configure(state="normal")
         self.cancel_button.configure(state="disabled")
         if runner.status.cancelled:

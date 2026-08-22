@@ -124,10 +124,13 @@ def _boundaries_between(start: Fraction, end: Fraction,
 # forms, and the same series scaled into the thirds family for notes that live
 # on a ternary grid. Anything not here needs a tie, whatever the metric
 # hierarchy thinks.
-# The plain note values, in beats: 8 down to a 32nd.
+# The plain note values, in beats: 8 down to a SIXTEENTH, and no further.
+# Nothing below 1/4 of a beat may be written (user directive, 2026-08-22) -
+# the ternary family below scales these by 2/3, so its floor is the sixteenth
+# triplet at 1/6, which still reads as a sixteenth notehead.
 _BASE_VALUES: Tuple[Fraction, ...] = (
     Fraction(8), Fraction(4), Fraction(2), Fraction(1),
-    Fraction(1, 2), Fraction(1, 4), Fraction(1, 8), Fraction(1, 16), Fraction(1, 32),
+    Fraction(1, 2), Fraction(1, 4),
 )
 
 # What a SINGLE notehead can carry: those values, their dotted forms (x3/2),

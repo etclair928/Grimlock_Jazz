@@ -210,13 +210,42 @@ def _leading_tuplet_rest(onset, divisor: int):
     if silent <= 0:
         return None
     rest = m21note.Rest()
-    _apply_tuplet(rest, silent, divisor)
+    # If the silence is too short to WRITE, there is no anchoring rest to
+    # insert. _apply_tuplet now returns 0.0 rather than a raw length for that
+    # case (a raw length makes music21 invent a 32nd-note tuplet from it), and
+    # a zero-length rest cannot be serialized at all - "Cannot convert
+    # durations without types". No rest is the right answer: the frame simply
+    # is not anchored here, which the tuplet audit will report honestly.
+    if _apply_tuplet(rest, silent, divisor) <= 0:
+        return None
     return float(beat_start), rest
 
 
 # Which "in the time of" a subdivision is written against: the largest power of
 # two at or below it, which is the convention every edition uses - 6 in the
 # time of 4, 5 in the time of 4, 7 in the time of 4, 12 in the time of 8.
+# A sixteenth, in quarter-lengths. The finest notehead this project will draw.
+_MIN_WRITTEN_VALUE = 0.25
+
+
+def _writable_or_zero(ql: float) -> float:
+    """The largest value we are willing to WRITE that fits inside `ql`.
+
+    ASSIGNING A RAW LENGTH IS NOT NEUTRAL, which is the trap this exists to
+    close. Setting el.quarterLength to 0.1 does not produce "a short note" -
+    music21 derives a 10:8 tuplet with a thirty-second notehead from it,
+    because that is the only way 1/10 of a quarter can be written. So every
+    fallback path that used to hand back the raw length was quietly MAKING the
+    forbidden tuplets it was trying to avoid: 148 of them on one Chopin page,
+    every one a 32nd inside a 10:8.
+
+    Returns 0.0 when nothing writable fits, and callers drop those - a note
+    too short to write is evidence the beat grid is wrong, and dropping it
+    surfaces that where a 32nd-note decuplet buried it.
+    """
+    return notatable_at_most(float(ql))
+
+
 def _normal_count(divisor: int) -> int:
     n = 1
     while n * 2 <= divisor:
@@ -253,13 +282,27 @@ def _apply_tuplet(el, ql, divisor: int):
     untupleted = notatable_at_most(float(ql) * divisor / normal)
     used = untupleted * normal / divisor
     if used <= 0 or used > float(ql) + 1e-9:
-        el.quarterLength = float(ql)
-        return float(ql)
+        fallback = _writable_or_zero(ql)
+        el.quarterLength = fallback
+        return fallback
+    # NOTHING FINER THAN A SIXTEENTH GETS A BRACKET (user directive,
+    # 2026-08-22). The written value is `untupleted`; if that is below a
+    # sixteenth then the notehead inside the bracket is a 32nd or worse, which
+    # is forbidden outright - and music21 will happily build the Tuplet anyway
+    # and then fail at serialization with "Cannot convert 2048th duration to
+    # MusicXML", which is how this guard was found. Falling back to the plain
+    # value is right: a rhythm too fine to write is evidence the beat grid is
+    # wrong, and it should surface as a coarse note rather than as a bracket
+    # nobody can read.
+    if untupleted < _MIN_WRITTEN_VALUE - 1e-9:
+        fallback = _writable_or_zero(ql)
+        el.quarterLength = fallback
+        return fallback
     try:
         el.duration = m21duration.Duration(untupleted)
         el.duration.appendTuplet(m21duration.Tuplet(divisor, normal))
     except Exception:
-        el.quarterLength = used
+        el.quarterLength = _writable_or_zero(used)
     return float(el.quarterLength)
 
 
@@ -814,6 +857,7 @@ def build_music21_score(score: NotationScore, grid_chords: bool = True):
                         lead = _leading_tuplet_rest(onset, divisor)
                         if lead is not None and lead[0] >= _voice_filled_to - 1e-9:
                             m_voice.insert(lead[0], lead[1])
+                            _voice_filled_to = onset
 
                     chain = split_for_hierarchy(
                         Fraction(onset).limit_denominator(_HIERARCHY_MAX_DEN),
