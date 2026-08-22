@@ -42,10 +42,18 @@ PASS = "pass"
 FAIL = "fail"
 INFO = "info"
 
-# Positions inside a beat a notated onset may legally occupy. Anything else is
-# an artifact - see the k/24 investigation, where onsets drifted onto k/24
-# because a note had been written 1/24 too long and displaced everything after
-# it.
+# Positions inside a beat a notated onset may legally occupy WITHOUT a tuplet
+# to justify it - see the k/24 investigation, where onsets drifted onto k/24
+# because a note had been written 1/24 too long and displaced everything after.
+#
+# A NOTE INSIDE A TUPLET IS JUDGED BY ITS OWN TUPLET, not by this list. When
+# the engine began emitting real tuplets, this check reported Chopin going
+# from 1 off-grid onset to 74 - and every one of the 74 sat at a denominator
+# of 9, 5, 10 or 7, inside a 9:8, 5:4, 10:8 or 7:4 bracket that explains it
+# exactly. A ninth of a beat is a perfectly ordinary position for a note in a
+# nonuplet. The list encoded a binary-and-triplet vocabulary and called
+# everything else an artifact, which was fine only while nothing else was ever
+# written.
 LEGAL_ONSET_DENOMINATORS = (1, 2, 3, 4, 6, 8, 12, 16)
 
 # The published edition's own score under the calibrated playability model.
@@ -133,16 +141,35 @@ def check_barlines(score) -> Tuple[int, int, List[str]]:
     return notes, rests, examples
 
 
+def _tuplet_explains(fraction: Fraction, element) -> bool:
+    """Does a tuplet on this note account for its position within the beat?
+
+    A note at 1/9 of a beat is an artifact on a plain beat and correct inside
+    a nonuplet. The bracket the note actually carries is the authority.
+    """
+    for tuplet in (element.duration.tuplets or ()):
+        actual = int(getattr(tuplet, "numberNotesActual", 0) or 0)
+        if actual <= 0:
+            continue
+        if fraction.denominator % actual == 0 or actual % fraction.denominator == 0:
+            return True
+    return False
+
+
 def check_onset_grid(score) -> Tuple[int, int, Dict[str, int]]:
-    """Every notated onset must sit on a legal position within its beat."""
+    """Every notated onset must sit on a position its own notation explains -
+    a binary or triplet subdivision, or one its tuplet accounts for."""
     total = 0
     offenders: Dict[str, int] = {}
     for _part, _measure, voice, _bar in _measures(score):
         for el in voice.notes:
             total += 1
             frac = Fraction(float(el.offset)).limit_denominator(96) % 1
-            if frac.denominator not in LEGAL_ONSET_DENOMINATORS:
-                offenders[str(frac)] = offenders.get(str(frac), 0) + 1
+            if frac.denominator in LEGAL_ONSET_DENOMINATORS:
+                continue
+            if _tuplet_explains(frac, el):
+                continue
+            offenders[str(frac)] = offenders.get(str(frac), 0) + 1
     return total, sum(offenders.values()), offenders
 
 

@@ -1050,8 +1050,21 @@ def transcribe_file(
         if beat_timing is not None:
             annotations.add(Annotation(
                 note_id=note.id, kind=NOTATION_TIMING_ANNOTATION_KIND,
+                # tuplet_divisor MUST travel with is_tuplet. Dropping it (as this
+                # did until 2026-08-21) silently disabled the entire deliberate
+                # tuplet path: the exporter's _apply_tuplet and
+                # _leading_tuplet_rest are both gated on `if divisor`, so with
+                # the flag but no number the page emitted NO tuplets at all -
+                # measured, zero group starts on every song - while the widened
+                # snap still produced ternary durations. music21 then invented
+                # a bracket for each one at serialization, placing it wherever
+                # the arithmetic fell and reconciling leftovers as 6:5. That is
+                # where the junk ratios and the off-beat groups both came from.
+                # InferredNoteTiming has carried this field, documented as "the
+                # page needs the NUMBER, not just the flag", the whole time.
                 value={"start_ms": beat_timing.notation_start_ms, "end_ms": beat_timing.notation_end_ms,
-                       "reason": beat_timing.reason, "is_tuplet": beat_timing.is_tuplet},
+                       "reason": beat_timing.reason, "is_tuplet": beat_timing.is_tuplet,
+                       "tuplet_divisor": beat_timing.tuplet_divisor},
                 source=Provenance.TEMPORAL_LATTICE,
             ))
             rhythm_inferred_count += 1
