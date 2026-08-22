@@ -207,12 +207,33 @@ SWING_FULL_TRIPLET = 2.0 / 3.0    # a fully swung pair sits on the triplet grid
 
 
 def _tuplet_penalty_for(divisor: int, swing_ratio: float) -> float:
-    """The reading cost of a tuplet, discounted by how swung the track is."""
+    """The reading cost of a tuplet, discounted by how swung the track is.
+
+    A SEXTUPLET IS A STRONGER CLAIM THAN A TRIPLET AND MUST COST MORE. This
+    used to test `divisor % 3` and hand 6 exactly the same discount as 3 - so
+    the two were priced identically while the six-part grid can express
+    strictly MORE onset patterns than the three-part one. Whenever a beat fit
+    neither cleanly, 6 won on flexibility alone.
+
+    Measured, after 5/7/9/10/12 were removed from the vocabulary: Chopin's
+    Nocturne came back with 879 tuplet notes and 965 SEXTUPLET brackets -
+    almost every beat. Removing the exotic divisors had not fixed the misfit,
+    it had simply left 6 as the only escape hatch, and the fitter took it. The
+    grid still does not fit the performance; that is the disease, and this is
+    the third different symptom of it.
+
+    So the swing discount now applies to the TRIPLET only, which is what swing
+    actually is, and every coarser division of three pays in proportion to how
+    much finer it is. The user's rule is the target: "Tuplets of 2... sometimes
+    3."
+    """
     if divisor % 3 != 0:
         return _TUPLET_PENALTY
-    span = SWING_FULL_TRIPLET - SWING_STRAIGHT
-    swung = (float(swing_ratio) - SWING_STRAIGHT) / span if span > 0 else 0.0
-    return _TUPLET_PENALTY * max(0.0, min(1.0, 1.0 - swung))
+    if divisor == 3:
+        span = SWING_FULL_TRIPLET - SWING_STRAIGHT
+        swung = (float(swing_ratio) - SWING_STRAIGHT) / span if span > 0 else 0.0
+        return _TUPLET_PENALTY * max(0.0, min(1.0, 1.0 - swung))
+    return _TUPLET_PENALTY * (divisor / 3.0)
 
 
 # WRITE SWING AS TRIPLETS, NOT AS STRAIGHT EIGHTHS (user directive 2026-08-18:
