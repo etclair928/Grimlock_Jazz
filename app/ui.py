@@ -388,10 +388,28 @@ class TranscribeWindow(ttk.Frame):
 
 
 def main() -> None:
+    """Two explicit modes, as decided: Transcribe makes a chart, Lab asks
+    whether the engine is getting better. Sharing one window and one library
+    layer, but not one screen - neither job compromises the other."""
+    from app.lab_ui import LabWindow
+
     root = tk.Tk()
-    root.title("Grimlock Jazz 6.0 - Transcribe")
-    root.geometry("1040x900")
-    TranscribeWindow(root)
+    root.title("Grimlock Jazz 6.0")
+    root.geometry("1120x960")
+    root.columnconfigure(0, weight=1)
+    root.rowconfigure(0, weight=1)
+
+    tabs = ttk.Notebook(root)
+    tabs.grid(row=0, column=0, sticky="nsew")
+
+    transcribe = ttk.Frame(tabs)
+    transcribe.columnconfigure(0, weight=1)
+    transcribe.rowconfigure(0, weight=1)
+    TranscribeWindow(transcribe)
+    tabs.add(transcribe, text="   Transcribe   ")
+
+    lab = LabWindow(tabs)
+    tabs.add(lab, text="   Lab   ")
     root.mainloop()
 
 
