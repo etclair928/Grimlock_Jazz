@@ -846,6 +846,10 @@ def export_musicxml(score: NotationScore, path: str, grid_chords: bool = True) -
     m_score = build_music21_score(score, grid_chords=grid_chords)
     m_score.write("musicxml", fp=path)
     _normalize_voice_numbers(path)
+    # The bytes are the only place left to enforce the barline - see
+    # output/musicxml_repair.py and the open-defect note below.
+    from output.musicxml_repair import repair_measures
+    repair_measures(path)
     return path
 
 
