@@ -49,6 +49,37 @@ CONSOLIDATION_ANNOTATION_KIND = "consolidation"
 # below a 32nd at typical tempi so we merge artifacts, not real fast repeats.
 DEFAULT_MERGE_GAP_MS = 60.0
 
+# BELOW THIS GAP THE ATTACK GATE DOES NOT APPLY, because no player can
+# re-articulate that fast and so no onset found there can be a second attack.
+#
+# WHY IT IS NEEDED. The attack gate is binary: any onset within 50ms of the
+# boundary stops the run. That was added to fix real over-merging - measured on
+# Ellington, consolidation had been deleting 31% of notes and 43% of the 4+
+# note chords - and it swung the other way. Measured across the corpus, runs
+# from before the gate absorbed 100% of eligible fragments and runs after it
+# absorb 24-64%:
+#
+#     run                     eligible  absorbed  caught
+#     Hopeful_UNI (pre-gate)      1376      1376    100%
+#     Hopeful_TUP (post-gate)     1376       878     64%
+#     HRV_GATE    (pre-gate)       857       857    100%
+#     HRV_FULLRUN (post-gate)      864       310     36%
+#     Chopin                       882       216     24%
+#
+# WHAT THE GATE IS ACTUALLY BLOCKING. Of the merges it stops, 96-99% are notes
+# that end and restart within 15ms of each other - 642 of Chopin's 666, 471 of
+# Burden's 478. Fifteen milliseconds is a sixty-fourth note at 240bpm. It is
+# not a performed gap; it is where Basic Pitch drew a segmentation boundary
+# inside one sounding event, and the onset the gate sees there is the note's
+# OWN attack, found again.
+#
+# So the exemption is a statement about physics rather than a tuned threshold,
+# and it is deliberately far below any real repeat. The 7-24 pairs per song
+# that DO have 15-60ms of genuine silence stay gated - that band is where a
+# fast repeated note lives, and it is what the Ellington measurement was
+# protecting.
+MIN_REARTICULATION_GAP_MS = 20.0
+
 
 # How close a detected onset must be to the boundary between two same-pitch
 # notes to count as a fresh attack there.
@@ -122,7 +153,14 @@ def consolidate_fragments(
                    # Reflections in D, consolidation deleted 31% of notes and 43%
                    # of the 4+ note chords, taking mean chord size to 3.16 against
                    # the reference's 6.07.
-                   and not _has_attack(group[j].start_ms, stem_onsets)):
+                   #
+                   # UNLESS the two notes are touching. Below
+                   # MIN_REARTICULATION_GAP_MS no player could have struck the
+                   # pitch again, so whatever onset sits at the boundary is this
+                   # note's own attack seen a second time - not evidence of a
+                   # repeat. See that constant for the measurement.
+                   and (group[j].start_ms - run_end < MIN_REARTICULATION_GAP_MS
+                        or not _has_attack(group[j].start_ms, stem_onsets))):
                 run.append(group[j])
                 run_end = max(run_end, group[j].end_ms)
                 j += 1
@@ -154,4 +192,5 @@ def consolidate_fragments(
     return runs_merged, fragments_absorbed
 
 
-__all__ = ["consolidate_fragments", "CONSOLIDATION_ANNOTATION_KIND", "DEFAULT_MERGE_GAP_MS"]
+__all__ = [
+    "MIN_REARTICULATION_GAP_MS","consolidate_fragments", "CONSOLIDATION_ANNOTATION_KIND", "DEFAULT_MERGE_GAP_MS"]

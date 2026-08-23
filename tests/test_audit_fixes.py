@@ -406,15 +406,45 @@ def test_consolidation_records_its_last_fragment():
 
 
 def test_consolidation_is_gated_on_a_real_attack():
-    """A detected attack at the boundary means the player struck the pitch
-    again - the run must stop rather than swallow the re-articulation."""
+    """A detected attack at the boundary, ACROSS A REAL GAP, means the player
+    struck the pitch again - the run must stop rather than swallow it.
+
+    This is the Ellington protection: planing textures re-struck by design lost
+    31% of their notes and 43% of their 4+ note chords before the gate existed.
+    The gap here is 40ms, inside the 15-60ms band where a fast repeat lives.
+    """
     from core import AnnotationStore
     from quantization.note_consolidation import consolidate_fragments
+    fragments = [_note(60, 0.0, 100.0), _note(60, 140.0, 240.0)]
+    annotations = AnnotationStore()
+    runs, absorbed = consolidate_fragments(
+        fragments, annotations, onsets_ms=[140.0])
+    assert (runs, absorbed) == (0, 0), "an attack across a real gap must block the merge"
+
+
+def test_touching_notes_merge_even_with_an_attack_at_the_boundary():
+    """AMENDED CONTRACT (2026-08-23). This case used to assert the opposite,
+    with a gap of exactly ZERO - encoding the assumption that any onset at a
+    boundary proves a re-articulation.
+
+    Measurement contradicts it. Of the merges the gate blocks across the
+    corpus, 96-99% are notes touching within 15ms: 642 of Chopin's 666, 471 of
+    Burden's 478. Fifteen milliseconds is a sixty-fourth note at 240bpm - no
+    player re-articulates that fast, so the onset found there is the note's own
+    attack seen again, not a second one. Blocking those left runs absorbing
+    24-64% of eligible fragments where pre-gate runs absorbed 100%.
+    """
+    from core import AnnotationStore
+    from quantization.note_consolidation import (
+        consolidate_fragments, MIN_REARTICULATION_GAP_MS,
+    )
+    assert MIN_REARTICULATION_GAP_MS < 31.0, (
+        "must stay below a 32nd note at 240bpm, or it starts eating real repeats")
     fragments = [_note(60, 0.0, 100.0), _note(60, 100.0, 200.0)]
     annotations = AnnotationStore()
     runs, absorbed = consolidate_fragments(
         fragments, annotations, onsets_ms=[100.0])
-    assert (runs, absorbed) == (0, 0), "an attack at the boundary must block the merge"
+    assert (runs, absorbed) == (1, 1), "touching notes are one sounding event"
 
 
 if __name__ == "__main__":
