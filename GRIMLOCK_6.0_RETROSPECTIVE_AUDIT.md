@@ -32,6 +32,29 @@ Basic Pitch. Note the split honestly: separation genuinely **improves recall**
 (0.369 vs 0.236) and badly hurts precision. It finds real quiet notes and
 buries them.
 
+**PROTOTYPED 2026-08-23** — `separation_engine/stem_attribution.py`. Validated
+by asking whether f0 energy across stems can recover a label the pipeline
+already assigned, on Hopeful:
+
+| detected as | recovered | leaks to |
+|---|---|---|
+| vocals | **97%** | — |
+| bass | 64% | 14% vocals, 11% drums |
+| harmonic (guitar+piano+other) | 59% | **31% vocals** |
+
+72% overall; 78% among uncontested notes. A first scoring said 54% — that was
+my own confound, counting an `other` note found in `guitar.wav` as an error
+when the pipeline merges those three stems precisely because htdemucs_6s
+reassigns content between them.
+
+**Not yet good enough to replace per-stem detection**: a quarter of notes
+would be mislabelled, and the weak spot is the harmonic family, which is
+exactly where Demucs itself is weakest. What it does establish is that the
+mechanism works where separation is clean (97% on vocals), and that a shared
+note can be reported as CONTESTED rather than silently duplicated into two
+stems. The end-to-end path — detect on mix, attribute, notate, score — has
+**not** been run.
+
 **Retrospective fix: detect once on the mix; use stems only to attribute.**
 For a note at f0 spanning t0–t1, compare energy at f0 across stems and label it
 by whichever holds most. A leak then costs a wrong *name*, never a phantom
