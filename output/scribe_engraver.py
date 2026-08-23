@@ -30,6 +30,8 @@ from quantization import (
 )
 from acoustic_witness import (HARMONIC_LEGITIMACY_ANNOTATION_KIND, NOTE_SUPPORT_ANNOTATION_KIND,
                               OCTAVE_STACK_ANNOTATION_KIND, UNSUPPORTED)
+from instrument_attribution.range_check import (RANGE_ANNOTATION_KIND,
+                                                IMPLAUSIBLE as RANGE_IMPLAUSIBLE)
 
 _HARMONIC_ILLEGITIMATE_VERDICTS = ("noise", "hallucination")
 
@@ -438,6 +440,23 @@ def engrave(
             # the same piece with one clean harmonic stem. Off by default.
             octave = annotations.latest_value(note.id, OCTAVE_STACK_ANNOTATION_KIND)
             if octave is not None and octave.get("role") == "interior":
+                continue
+            # RANGE PLAUSIBILITY. A bass note above G4 or a vocal note below
+            # C2 is not a performance, it is bleed from another stem or an
+            # octave artifact. This verdict has been WRITTEN since 2026-08-06
+            # and read by nothing until now - found by auditing every
+            # annotation kind for a reader, the same way tuplet_divisor was.
+            #
+            # It is the sharpest of the four stem-quality witnesses measured
+            # on this corpus. Across Burden, Hopeful, HRV and Chopin it splits
+            # cleanly: every stem scoring 0% out-of-range is one the pipeline
+            # handled well (Hopeful's vocals sit in a textbook 44-89), and
+            # every stem scoring 5-8% is one of the bad ones (Burden's vocals
+            # span 29-101, HRV's 27-100). By contrast SchoenbergMirror's
+            # "uncertain" fires on 63% of Chopin's piano notes, which is our
+            # single best output, so it cannot be used this way.
+            in_range = annotations.latest_value(note.id, RANGE_ANNOTATION_KIND)
+            if in_range is not None and in_range.get("verdict") == RANGE_IMPLAUSIBLE:
                 continue
 
         # Consolidation (opt-in): a same-pitch fragment absorbed into an

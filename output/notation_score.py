@@ -395,6 +395,18 @@ def build_routed_score(
     uni_drop: set = set()
     uni_extend: Dict[str, float] = {}
     uni_cohesion: Dict[str, str] = {}
+    # RANGE PLAUSIBILITY, on the page as well as in the MIDI. Written since
+    # 2026-08-06 and consumed by nothing until the annotation audit found it.
+    # A bass note above G4 is bleed, not music, and the bound is deliberately
+    # generous so it catches artifacts rather than policing unusual playing.
+    if drop_octave_stacks:
+        from instrument_attribution.range_check import (
+            RANGE_ANNOTATION_KIND, IMPLAUSIBLE as _RANGE_BAD)
+        for n in notes:
+            verdict = annotations.latest_value(n.id, RANGE_ANNOTATION_KIND)
+            if verdict is not None and verdict.get("verdict") == _RANGE_BAD:
+                uni_drop.add(n.id)
+
     if drop_octave_stacks:
         # Folded into the same drop set the loop below already consults, so
         # there is exactly one place a note can vanish from the page.
