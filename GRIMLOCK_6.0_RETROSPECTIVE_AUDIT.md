@@ -131,12 +131,27 @@ Removed under this heading: a repetition gate whose condition was
 unsatisfiable, and an in-memory barline clamp that reported zero elements
 touched while the written file still had thirteen crossings.
 
-**Still open — `quantization/pitch_wobble_collapse.py` fires on 0.0% of notes
-on every song in the corpus**, including ones with real prominent vocals. It
-has four AND-ed gates; gate 4 requires continuous f0 spread ≤ 0.6 semitones,
-and ordinary vocal vibrato spans 1–2. *This is a lead, not a measured result* —
-the threshold has not been swept. Worth doing, because vocals are the worst
-stem we have by every other measure.
+**RESOLVED, against the suspicion.** `pitch_wobble_collapse` fires on 0.0% of
+notes, and the lead recorded here was that gate 4 (continuous f0 spread ≤ 0.6
+semitones) was too tight for vocal vibrato. Swept on Hopeful's real vocals
+audio:
+
+| ceilings | candidates | pass gate 3 | pass gate 4 | median f0 spread |
+|---|---|---|---|---|
+| 86/30 (shipped) | 5 | 0 | 0 | — |
+| 150/30 | 34 | 5 | **0** | **1.66 st** |
+| 300/80 | 71 | 15 | **0** | **1.61 st** |
+
+The surviving candidates measure ~1.6 semitones of continuous pitch spread.
+That is not a flat pitch flickering across a quantization boundary; it is
+real melodic motion. **Gate 4 is doing its job and the 0% is correct** —
+loosening it would delete melody. Do not touch this pass.
+
+One genuine sub-finding survives: `_tempo_adaptive_ceilings` returns
+`min(constant, 0.85 × sixteenth)`, so at 148bpm the member ceiling is 86ms
+whatever `PITCH_WOBBLE_MAX_MEMBER_DURATION_MS` says — the flat constant is
+inert, and only 20% of vocal notes (median duration 128ms) can even seed a
+group. Worth knowing before anyone tunes that constant expecting an effect.
 
 ### 9. Check docstrings against code
 
@@ -158,10 +173,16 @@ evaluate the register split then ran `assign_hands` over **every** part
 including bass and vocal lines, and reported 14 unplayable chords on Hopeful
 and HRV. Correctly scoped: 6 and 3.
 
-**Still open:** `output/piano_reduction.py` reads raw `note.end_ms` six times
-and consults **no annotations at all** — so the treble/bass split is computed
-on fragmented, un-consolidated notes, while sustain-recovery and consolidation
-verdicts sit unread. Same shape as the notation-quantizer bug.
+**FALSE POSITIVE, corrected.** The scan flagged `output/piano_reduction.py`
+for reading raw `note.end_ms` six times while consulting no annotations. It is
+not a defect: `piano_reduction` operates on `NotationNote`, whose `end_ms` is
+documented as "the end the page uses (sustain-extended when available)" and has
+`_consolidated_end_ms` applied at both construction sites before it is built.
+The module reads raw fields because its input is already the resolved value.
+
+Recorded rather than deleted, because the scan itself is worth keeping and its
+false-positive mode is worth knowing: **"reads raw fields" only indicts a
+module whose input is a raw Note.**
 
 ---
 
@@ -176,13 +197,12 @@ verdicts sit unread. Same shape as the notation-quantizer bug.
    zero. Klangio writes 213 whole notes where we write 37. Note that our tie
    behaviour is *already correct* (1.22 noteheads per sounding note vs
    Klangio's 1.20) — this is too many notes, not one note split badly.
-3. **`piano_reduction` reading raw notes** (lesson 10). Cheap, and the staff
-   split is currently decided on data we already know is wrong.
-4. **Sweep the wobble gates** (lesson 8). A pass that never fires on the stem
-   that needs it most.
-5. **Consume tempo/meter contention** (lesson 2). We measure witness
+3. **Consume tempo/meter contention** (lesson 2). We measure witness
    disagreement and discard it; that is the signal for "ask the user" in
-   guided mode.
+   guided mode. **Done 2026-08-23** — persisted in the intermediate and
+   surfaced in the health panel.
+4. ~~`piano_reduction` reading raw notes~~ — false positive, see lesson 10.
+5. ~~Sweep the wobble gates~~ — swept, the pass is correct, see lesson 8.
 
 ## Not worth doing
 

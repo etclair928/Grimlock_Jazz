@@ -261,6 +261,31 @@ def diagnose(pkl_path: Optional[str] = None,
             notes = data.get("all_notes", ())
             tempo_bpm = float(data.get("tempo_bpm") or 0.0)
             report.add("tempo", INFO, tempo_bpm, detail="bpm, as resolved")
+
+            # WITNESS DISAGREEMENT, surfaced. A resolved tempo with four
+            # witnesses behind it that agreed is a different fact from the
+            # same number with two of them excluded, and the panel should not
+            # present them identically. Absent on intermediates written before
+            # 2026-08-23, which simply shows as "not recorded".
+            contention = data.get("tempo_contention")
+            if contention:
+                witnesses = contention.get("witnesses") or []
+                said = ", ".join(
+                    f"{w.get('source')} {w.get('raw_tempo_bpm', 0):.0f}"
+                    + ("" if w.get("included") else " (excluded)")
+                    for w in witnesses)
+                report.add("tempo_agreement", INFO,
+                           f"{sum(1 for w in witnesses if w.get('included'))}"
+                           f"/{len(witnesses)} witnesses agreed",
+                           reference=round(float(contention.get("resolved_tempo_bpm")
+                                                 or tempo_bpm), 1),
+                           detail=f"the witnesses said: {said}. Disagreement is "
+                                  f"the signal to set tempo by hand in guided "
+                                  f"mode rather than trust the average")
+            elif "tempo_contention" in data:
+                report.add("tempo_agreement", INFO, "witnesses agreed",
+                           detail="no contention recorded - the referee did not "
+                                  "have to exclude or fold any witness")
             report.add("time_signature", INFO, tuple(data.get("time_signature") or ()))
         except Exception as exc:
             report.errors.append(f"could not read {pkl_path}: {exc}")

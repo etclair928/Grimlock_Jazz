@@ -1528,6 +1528,19 @@ def transcribe_file(
                 "beat_times_ms": tuple(tempo_resolution.tempo_meter.beat_times_ms or ()),
                 "downbeat_times_ms": tuple(_dbs or ()),
                 "bar_origin_ms": (_dbs[0] if _dbs else None),
+                # WHERE THE WITNESSES DISAGREED. The referee builds a full
+                # record - every witness's raw bpm, confidence, weight, fold
+                # ratio, and whether it was included or thrown out - and until
+                # now that record went onto PipelineResult and nowhere else,
+                # so it died with the process. It is the single most useful
+                # thing to show a user in guided mode: when four witnesses
+                # split, the right answer is to ASK, and this says who said
+                # what. Chopin is the case in point - we report 70bpm where
+                # the edition implies 55.4, and the disagreement behind that
+                # number was being discarded.
+                "tempo_contention": tempo_resolution.contention,
+                "meter_contention": meter_resolution.contention,
+                "tempo_confidence": tempo_resolution.tempo_meter.confidence,
             }
             with open(str(save_intermediate_path), "wb") as fh:
                 pickle.dump(payload, fh)
