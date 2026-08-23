@@ -23,13 +23,31 @@ from typing import Dict, Tuple
 import numpy as np
 
 
+# 16384 float32 samples = the 65536 bytes this has always hashed.
+_HASH_SAMPLES = 16384
+
+
 def _content_hash(samples: np.ndarray, source_path: str) -> str:
     """Cheap cache-key identity for a decoded track - NOT a substitute for
     Ingestion's forensic file-integrity hash. Sampling a slice rather than
     hashing the full array keeps decode-time overhead flat regardless of
-    track length."""
-    sample_bytes = samples.astype(np.float32).tobytes()[:65536]
-    return hashlib.sha256(f"{source_path}:{samples.shape}:{sample_bytes}".encode()).hexdigest()
+    track length.
+
+    IT NOW DOES WHAT THAT SENTENCE SAYS. The previous line was
+    `samples.astype(np.float32).tobytes()[:65536]`, which converts the WHOLE
+    array to float32 (one full copy), serialises all of it to bytes (a second
+    full copy), and only then takes the first 64KB. On the 411-second Chopin
+    that is roughly 290MB of transient allocation to obtain 65KB, and on a
+    machine under memory pressure it raises MemoryError during decode - which
+    is how it was found. Slicing before converting bounds the work at 64KB
+    whatever the track length, which is what the docstring always claimed.
+
+    The digest changes for tracks longer than the slice, so any cache keyed on
+    it is invalidated once. It is an in-process cache key, not a stored one.
+    """
+    head = np.ascontiguousarray(samples[..., :_HASH_SAMPLES]).astype(np.float32)
+    return hashlib.sha256(
+        f"{source_path}:{samples.shape}:{head.tobytes()}".encode()).hexdigest()
 
 
 @dataclass
