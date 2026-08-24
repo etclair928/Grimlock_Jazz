@@ -163,6 +163,28 @@ def transcribe_file(
         # a user overriding it is speaking the machine's own language rather
         # than a parallel set of flags.
         guided_separation: Optional[str] = None,
+        # BASIC PITCH'S OWN DIALS, which the conductor has never passed - every
+        # stem has run on library defaults since the beginning. Swept against
+        # the Chopin answer key (tools/, 2026-08-23), 30 configurations:
+        #
+        #   baseline  onset 0.50 frame 0.30 minlen 58   3204 notes  F1 0.609
+        #   tuned     onset 0.60 frame 0.45 minlen 107  2045 notes  F1 0.679
+        #
+        # +0.070 F1, precision 0.517 -> 0.710, and the short-note share falls
+        # from 32% to 25%. The surface is FLAT across frame 0.45-0.50 and onset
+        # 0.60-0.65 - the top seven configurations sit within 0.010 - so these
+        # are a robust region rather than a fitted maximum.
+        #
+        # BUT IT DOES NOT GENERALISE. Re-swept on Burden of Sentiment against
+        # Klangio, every configuration lands within 0.004 of baseline: note
+        # count falls 44%, precision rises, recall falls, and they cancel.
+        # Chopin is solo piano under heavy pedal, which is exactly the case a
+        # stricter frame threshold should help. So these stay None (library
+        # defaults) and are set per-material by the caller - see the solo
+        # fast path, which already knows when it is looking at a piano.
+        detection_onset_threshold: Optional[float] = None,
+        detection_frame_threshold: Optional[float] = None,
+        detection_min_note_ms: Optional[float] = None,
         routed_layout: bool = True,
         save_intermediate_path: Optional[Union[str, Path]] = None,
         university_mode: Union[str, "UniversityMode"] = "off",
@@ -393,7 +415,15 @@ def transcribe_file(
             continue
         stem_track = separation.get_stem(stem)
         stem_tracks_by_type[stem] = stem_track
-        stem_notes, posteriorgram = transcribe_basic_pitch_with_posteriorgram(engine, stem_track, stem)
+        _detect_kwargs = {}
+        if detection_onset_threshold is not None:
+            _detect_kwargs["onset_threshold"] = detection_onset_threshold
+        if detection_frame_threshold is not None:
+            _detect_kwargs["frame_threshold"] = detection_frame_threshold
+        if detection_min_note_ms is not None:
+            _detect_kwargs["min_note_duration_ms"] = detection_min_note_ms
+        stem_notes, posteriorgram = transcribe_basic_pitch_with_posteriorgram(
+            engine, stem_track, stem, **_detect_kwargs)
 
         # AnechoicMa (ported): frame-level silence/resonance/activity
         # evidence for this stem's own audio - queried per note below.

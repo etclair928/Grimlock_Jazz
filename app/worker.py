@@ -65,6 +65,9 @@ def main() -> int:
             guided_tempo_bpm=cfg.guided_tempo_bpm,
             guided_time_signature=ts,
             guided_key=cfg.guided_key,
+            detection_onset_threshold=cfg.detection_onset_threshold,
+            detection_frame_threshold=cfg.detection_frame_threshold,
+            detection_min_note_ms=cfg.detection_min_note_ms,
             music_box=box,
         )
         result.update({

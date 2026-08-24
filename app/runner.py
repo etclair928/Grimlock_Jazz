@@ -104,6 +104,11 @@ class RunConfig:
     guided_time_signature: Optional[List[int]] = None
     guided_key: Optional[str] = None
 
+    # Basic Pitch's dials. None = library defaults; see transcribe_file.
+    detection_onset_threshold: Optional[float] = None
+    detection_frame_threshold: Optional[float] = None
+    detection_min_note_ms: Optional[float] = None
+
     use_notation_timing: bool = True
     use_consolidated_timing: bool = True
     drop_purge_candidates: bool = False
