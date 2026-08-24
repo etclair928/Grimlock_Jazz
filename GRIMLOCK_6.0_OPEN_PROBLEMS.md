@@ -2474,3 +2474,278 @@ evidence*. It still is — `detect_pickup`, the downbeat phase until this sessio
 **optimising the half of the pipeline that cannot move the number we are
 grading ourselves on**, while the other half emits two wrong notes for every
 right one and nobody has built the filter that would catch them.
+
+---
+
+## XXIV. The measurement session — a GUI, the fragmentation regression, and thirteen wrong hypotheses (2026-08-19 → 08-23)
+
+The headline is not a fix. It is a ratio: **thirteen times in this session a
+finding turned out to be a bad measurement rather than a bad implementation** —
+including two findings from this session's own audit, retracted a day after
+being written. That number is the most transferable thing here, and every claim
+below therefore names how it was measured.
+
+### XXIV.1 The largest single gain came from NOT running a model
+
+Every Chopin file in the project was the same 180-second excerpt. The complete
+411-second Rubinstein recording — the performance the answer key and the
+Klangio transcription were both made from — was sitting in `Downloads`.
+
+Run as one harmonic stem, with Demucs skipped:
+
+| | 180s clip, 6 stems | 411s full, solo piano |
+|---|---|---|
+| notes | 3466 | 3204 |
+| phantom drums/bass/vocals | 1546 / 463 / 200 | **0 / 0 / 0** |
+| precision | 0.374 | **0.512** |
+| recall | 0.785 | 0.735 |
+| **F1** | 0.507 | **0.603** |
+| key | D#m | **B major** (correct) |
+
+**+0.096 F1 in one step**, and the answer key now aligns all 2231 of its notes
+instead of 915. None of it came from a filter. It came from not inventing 2209
+notes from instruments that are not playing.
+
+The key came out right for a structural reason worth keeping: B major is
+established by the return and the final cadence, and the excerpt contained
+neither. Windowed key detection reads
+`B D#m D#m D#m Ab Eb Eb D#m B B B B` — opens in B, wanders, returns.
+
+`separation_engine/solo_detector.py` now answers "is this one instrument"
+before separation, from three physical facts: a kit makes broadband noise above
+8kHz repeatedly; **a piano cannot crescendo on a held note**, so sustained
+frames that RISE prove something that is not a piano (this is the witness that
+catches piano-plus-singer, which no percussion test can see); a guitar has no
+string below 82Hz. Zero ensembles were called solo across the corpus — the only
+error that silently deletes instruments.
+
+### XXIV.2 Separation should describe notes, not generate them
+
+The deeper version of XXIV.1, measured on Burden of Sentiment against Klangio:
+
+| candidate | notes | precision | recall | F1 |
+|---|---|---|---|---|
+| raw Basic Pitch, **no separation** | 1602 | 0.202 | 0.236 | **0.218** |
+| our `other` stem alone | 1977 | 0.168 | 0.243 | 0.199 |
+| our full six-stem pipeline | 3425 | 0.147 | **0.369** | 0.211 |
+
+The entire pipeline adds 1823 notes and does not beat feeding the raw mix to
+Basic Pitch. Read it honestly: separation genuinely **helps recall** (0.369 vs
+0.236) — it surfaces quiet notes buried in the mix — and badly hurts precision.
+
+The asymmetry that matters: **a stage that GENERATES can invent; a stage that
+DESCRIBES can only mislabel.** Separation is fallible either way, so it belongs
+where its errors are cheap. `separation_engine/stem_attribution.py` prototypes
+that: measure a note's f0 energy across stems, label it by the stem holding
+most. Validated by asking whether it recovers a label the pipeline already
+assigned — vocals 97%, bass 64%, harmonic family 59%, **72% overall, 78% among
+uncontested notes**. Not yet good enough to replace per-stem detection; the
+weak spot is the harmonic family, which is exactly where htdemucs_6s is weakest
+and why those three stems are merged already.
+
+### XXIV.3 The fragmentation regression — a gate blocking notes nobody could play
+
+Consolidation absorbs a fraction of what it is eligible to absorb, and the
+split is by DATE:
+
+| run | eligible | absorbed | caught |
+|---|---|---|---|
+| `Hopeful_UNI` (08-06) | 1376 | 1376 | **100%** |
+| `HRV_GATE` (08-07) | 857 | 857 | **100%** |
+| `Hopeful_TUP` (08-23) | 1376 | 878 | 64% |
+| `HRV_FULLRUN` (08-19) | 864 | 310 | 36% |
+| `Chopin` (08-18+) | 882 | 216 | **24%** |
+
+Same song, identical eligible count, different outcome. The attack gate landed
+2026-08-14 (`486db37`). It was right to exist — before it, over-merging deleted
+31% of Ellington's notes and 43% of its 4+ note chords — but it is **binary**,
+and we swung from over-merging to under-merging. Both extremes are documented
+failures.
+
+Of the merges it blocked, **96-99% are notes that end and restart within 15ms**
+(642 of Chopin's 666, 471 of Burden's 478). Fifteen milliseconds is a
+sixty-fourth note at 240bpm. Nobody re-articulates that fast, so the onset at
+that boundary is the note's OWN attack found a second time.
+
+Fixed by `MIN_REARTICULATION_GAP_MS = 20` — a statement about what a player can
+physically do, not a tuned threshold. Verified at the boundary: gap 0 and 10ms
+merge, gap 25 and 40ms stay blocked.
+
+**Confirmed on three songs never run before**, all back to 100% caught. The
+decisive one is `You_Say_God_Says`, which the consolidation module cites BY
+NAME as having returned 33.5% sub-32nd notes when the gate misbehaved: it now
+runs at **1.4%**. The merges were recovered without reopening the over-merge.
+
+### XXIV.4 Tuplets — the number that was computed and dropped
+
+`rhythm_inference` decided a per-beat `tuplet_divisor`, the annotation writer
+carried `is_tuplet` and dropped the number, and both exporter functions are
+gated on `if divisor`. **The page emitted no deliberate tuplets at all** —
+every bracket on every page was music21 inferring one from a duration it could
+not express, which is simultaneously the junk-ratio source and the off-beat
+source. One field.
+
+With it restored, Hopeful's divisors read 3x541 and 6x182 — triplets and
+sextuplets, which is what a shuffle is, and what the user said this song was
+from the beginning.
+
+**The vocabulary is now short, by directive:** no 5, 7, 9, 10, 12, and nothing
+finer than a sixteenth ever written. The evidence backed the directive — with
+the wide vocabulary available, Chopin read **146 of its 314 tuplet notes as
+nonuplets and 10-tuplets**. That is not ornamentation; it is the beat fitter
+given enough rope to explain onsets the grid did not fit. **The weird tuplet is
+the symptom, not the disease**, and leaving it available lets a grid error hide
+as a notation choice.
+
+### XXIV.5 k/24 — a ceiling that could be exceeded
+
+`notatable_at_most` returned `min(allowed)` when nothing fit under its ceiling —
+a value *longer* than the bound it existed to enforce. Fifteen notes were asked
+for <= 1/12 of a beat and given 1/8, overrunning by exactly 1/24 each and
+displacing every onset after them. That single line produced the whole k/24
+family.
+
+Generalised: **any function whose name promises a bound must be checked for the
+branch where the bound cannot be met.** Returning 0 and letting the caller
+decide is correct; returning something out of bounds is not.
+
+The same error recurred once more in this session, in code written to fix it —
+`_notatable_chain` folded a sub-notatable residue into the previous note to
+keep a chain summing exactly. Growing a note to absorb a leftover pushes the
+next onset. **Shortening is always safe; lengthening never is.**
+
+### XXIV.6 Two remaining rule violations are the serializer's, not ours
+
+Measured, one object, one serialization apart: in memory the score has **2326
+onsets and none off-grid**; written and read back it has **2327, one at 17/24**.
+music21's writer adds a note and places it off the grid. Same author as the
+barline-crossing rests — full-bar rests it writes mid-bar when a voice runs
+short.
+
+`output/musicxml_repair.py` now works on the bytes, because that is the only
+place left: an in-memory clamp reported zero elements touched while the written
+file still had thirteen crossings, `makeNotation=False` raises on complex
+durations, and `splitAtDurations()` does not clear it. It rewrites the
+**ambiguous whole rest** — a whole rest IS the conventional bar rest in any
+meter, so writing one for four beats of a six-beat bar makes MuseScore draw it
+filling the bar. 148 fixed on Hopeful, 77 on HRV, and rest-crossings 4 -> 0.
+
+### XXIV.7 A verdict is only useful if it discriminates
+
+The counterweight to §XVIII.5's "unconsumed evidence" theme. Not every unread
+verdict deserves wiring, and the test is whether it fires *differently* on
+material we handled well versus badly:
+
+| witness | Hopeful vocals (good) | Burden vocals (bad) | Chopin piano (our best) | usable? |
+|---|---|---|---|---|
+| range implausible | **0%** | **8%** | **0%** | **yes** |
+| Schoenberg "uncertain" | 16% | 93% | **63%** | no |
+| key-fit out of key | 9% | 8% | **15%** | no |
+
+`RANGE_ANNOTATION_KIND` — written every run since 2026-08-06, read by nothing,
+and its own header records this same finding on a different song — is now
+wired. It drops 2.8% on Burden, 2.6% on HRV, **0.1% on Hopeful and 0% on
+Chopin**, only ever from bass and vocals. That distribution is the point: it is
+silent on material we handle well.
+
+The other two must stay explanatory. Chopin is chromatic and modulating, so
+out-of-key notes there are real music.
+
+**Also answered, in the negative:** we are *not* broadly mistaking partials for
+pitches. Notes sitting on a harmonic of a lower struck note run at 32.5% for us
+and 32.1% for Klangio — a ratio of 1.01. The UPPER partials (5f/6f/8f) do run
+at 3x Klangio's rate, and they concentrate in the two stems the range check
+flags: vocals 9.2%, bass 4.5%, merged harmonic 2.0%.
+
+### XXIV.8 The octave filter, built and then refuted
+
+`acoustic_witness/octave_stack.py` flags the interior of a 3+-octave stack. On
+the six-stem clip it looked good: 87.2% of what it removed was unmatched by the
+answer key, +0.0035 F1. **On the full solo-piano run it is net-negative** —
+precision 54.4%, F1 -0.0033, with 26 of 57 flagged notes real.
+
+It was never an octave detector. The phantom bass and vocal notes were stacking
+octaves against real piano notes, so it was catching **stem bleed**. On clean
+input what remains is Chopin's own octave doubling. Kept, off by default,
+headers corrected in all three places.
+
+This is the clearest instance of the session's pattern: a filter measured on
+contaminated input, looking useful, and dissolving when the input was fixed.
+
+### XXIV.9 Chopin is a stress test, not a target
+
+Its local tempo spans **44-68 bpm (1.53x)**, and only **33% of the piece sits
+within 15% of any single tempo we could report**. There is no tempo there to
+get right. A single accuracy number on a rubato performance mostly measures how
+the aligner felt that day.
+
+But as a bug-finder it has been the most productive file in the project. It
+found the octave filter and then refuted it, the barline crossings, k/24, the
+`split_for_hierarchy` links no notehead can carry, the whole rest that reads as
+a bar rest, the dropped `tuplet_divisor`, `_content_hash` copying a whole track
+to read 64KB of it, and six of the thirteen measurement errors.
+
+**The steady-pulse material is the real target.** On Burden the grid is already
+right — 65.0 bpm against Klangio's 65.4, same meter, same 63 bars.
+
+### XXIV.10 The front end
+
+`app/` is a library layer with no UI imports (`probe`, `diagnostics`, `runner`,
+`progress`, `lab`) plus a tkinter window. Notation is handed off to MuseScore,
+so no renderer was needed and toolkit choice stopped mattering.
+
+Three things in it worth keeping:
+
+- **Probe is its own step.** It costs seconds and informs a decision that costs
+  half an hour, and it shows the three numbers behind its verdict.
+- **The clock never stops.** The pipeline is silent for most of its wall clock —
+  thirty decisions across thirty to seventy minutes — so a bar driven by events
+  freezes exactly when reassurance is wanted. The clock runs on wall time; the
+  bar counts milestones and is labelled as that, not as a time estimate; and a
+  quiet timer says "working, nothing reported for 4m 12s" rather than looking
+  hung.
+- **Window Pane finally has its consumer.** Its header has said since it was
+  written that the resolution was "build the frontend, not delete this."
+  Adopted by a TEE (`PaneMusicBox`) rather than forty-five edits to the
+  conductor: Music_Box keeps everything forever, Window_Pane keeps a bounded
+  window for whoever is watching now.
+
+### XXIV.11 Items from §XXIII, settled
+
+| §XXIII item | status |
+|---|---|
+| #1 stem-reality gate | **partly** — solo detector + range check, both wired |
+| #2 octave-collapse pass | **built and refuted** on clean input (XXIV.8) |
+| #3 beat-to-beat grid consistency | **superseded** — the actual mechanism was k/24 (XXIV.5), fixed |
+| #4 wire `detect_pickup` | **still open** |
+| #5 deduplicate unisons | **still open** |
+| #6 tempo curve to the page | **still open** |
+| #7 store `beat_times_ms` | **done** — and it mattered: without it a re-export engraved 2602 onsets where the pipeline wrote 2310 |
+| #8 settle metrical equivalence | **still open** — needs a ruling, not an implementation |
+
+### XXIV.12 Leverage ranking (supersedes §XXIII where they differ)
+
+1. **Detect once, attribute after.** The only change that could move F1 by a
+   step rather than a fraction. Prototyped at 72%; the end-to-end path has not
+   been run.
+2. **Chopin's tempo is 26% fast** — 70 bpm where the edition implies 55.4, and
+   not a clean octave error. Witness contention is now persisted so the
+   disagreement is visible; nothing acts on it yet. This is upstream of the
+   tuplet mess: a wrong grid makes every real value land between positions, and
+   the fitter reaches for a quintuplet to cover it.
+3. **Burden's note count** — 3425 against Klangio's 1368. Fragmentation was the
+   wrong suspect (our tie behaviour is already correct at 1.22 noteheads per
+   sounding note against Klangio's 1.20); this is over-detection, which is what
+   #1 addresses.
+4. **Wire `detect_pickup`** — written, exported, still called from nowhere.
+5. **Settle §XXIII.2** — a ruling.
+
+**Through-line, updated.** §XVIII.5 said the codebase carries unconsumed
+evidence; §XXIII said we were optimising the half of the pipeline that cannot
+move the number. Both still hold. What this session adds is a third:
+**roughly half of what a mechanical scan flags dissolves when measured.** The
+scans found `tuplet_divisor` and the range check, both real and both valuable —
+and also flagged `piano_reduction` and the wobble pass, both of which turned out
+to be working correctly. The scan is a candidate generator, not a verdict, and
+the discipline that separates the two is the only reason the fixes in this
+section are trustworthy.
