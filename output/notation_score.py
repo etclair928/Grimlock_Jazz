@@ -33,6 +33,7 @@ from quantization import (
 )
 from quantization.note_consolidation import CONSOLIDATION_ANNOTATION_KIND
 from acoustic_witness import ACOUSTIC_ACTIVITY_ANNOTATION_KIND
+from pitch_engine.bass_octave import BASS_OCTAVE_ANNOTATION_KIND
 
 # A voice's notes are monophonic by construction (stream_into_lines only
 # joins a note to a line when it does NOT overlap that line's last note).
@@ -138,6 +139,26 @@ class NotationScore:
     @property
     def total_notes(self) -> int:
         return sum(len(p.notes) for p in self.parts)
+
+
+def _page_pitch(note: Note, annotations: AnnotationStore) -> int:
+    """The pitch the page should use.
+
+    Basic Pitch's octave on the bass is arbitrated by CREPE
+    (pitch_engine/bass_octave.py), whose verdict arrives as an annotation
+    rather than a rewritten Note (DESIGN_DECISIONS §2.2). Notes with no such
+    annotation - which is all of them outside the bass, and most within it -
+    return their detected pitch untouched.
+
+    This exists as one helper rather than two inline reads because
+    NotationNote is constructed at two sites, and the last field added to
+    both was added to one, shipped, and cost a whole run.
+    """
+    corrected = annotations.latest_value(note.id, BASS_OCTAVE_ANNOTATION_KIND)
+    if corrected is None:
+        return int(note.pitch)
+    pitch = corrected.get("corrected_pitch")
+    return int(pitch) if pitch is not None else int(note.pitch)
 
 
 def _page_timing(note: Note, annotations: AnnotationStore, use_notation_timing: bool = True) -> Tuple[float, float]:
@@ -260,7 +281,7 @@ def build_notation_score(
         tuplet_divisor = nt.get("tuplet_divisor") if nt else None
         subdivision = int(nt.get("subdivision") or 4) if nt else 4
         buckets[key_tuple].append(NotationNote(
-            pitch=note.pitch, start_ms=start_ms, end_ms=end_ms,
+            pitch=_page_pitch(note, annotations), start_ms=start_ms, end_ms=end_ms,
             velocity=note.velocity, source_note_id=note.id, is_tuplet=is_tuplet,
             tuplet_divisor=tuplet_divisor,
             subdivision=subdivision,
@@ -457,7 +478,7 @@ def build_routed_score(
         subdivision = int(nt.get("subdivision") or 4) if nt else 4
         acoustic = annotations.latest_value(note.id, ACOUSTIC_ACTIVITY_ANNOTATION_KIND)
         by_stem[note.stem].append(NotationNote(
-            pitch=note.pitch, start_ms=start_ms, end_ms=end_ms,
+            pitch=_page_pitch(note, annotations), start_ms=start_ms, end_ms=end_ms,
             velocity=note.velocity, source_note_id=note.id, is_tuplet=is_tuplet,
             tuplet_divisor=tuplet_divisor,
             subdivision=subdivision,

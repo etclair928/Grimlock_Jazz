@@ -38,7 +38,7 @@ from separation_engine import (detect_solo_instrument, SOLO_PIANO, SOLO_GUITAR,
                                ENSEMBLE)
 from pitch_engine import (
     transcribe_basic_pitch, transcribe_basic_pitch_with_posteriorgram,
-    transcribe_crepe_bass, BASIC_PITCH_SAMPLE_RATE, continuous_f0, make_f0_sampler,
+    BASIC_PITCH_SAMPLE_RATE, continuous_f0, make_f0_sampler,
 )
 from instrument_attribution import resolve_instrument_identity, check_range, RANGE_ANNOTATION_KIND
 from key_intelligence import (analyze_key, analyze_key_from_notes, analyze_key_stability,
@@ -110,6 +110,9 @@ METER_DOWNBEAT_MIN_CONFIDENCE = 0.50
 DEFAULT_SEPARATION_MODEL = "htdemucs_6s"
 DURATION_ANNOTATION_KIND = "duration_hypothesis"
 
+from pitch_engine.bass_octave import (arbitrate_bass_octaves,
+                                       BASS_OCTAVE_ANNOTATION_KIND)
+
 _PITCHED_STEMS = (StemType.BASS, StemType.VOCALS, StemType.OTHER, StemType.GUITAR,
                   StemType.PIANO, StemType.BRASS)
 
@@ -121,7 +124,10 @@ class PipelineResult:
     separation_model: str
     separation_seed: Optional[int] = 0
     note_counts_by_stem: Dict[str, int] = field(default_factory=dict)
-    crepe_bass_note_count: int = 0
+    # CREPE's octave verdicts on the bass, ACTED ON (pitch_engine/bass_octave.py).
+    # Replaces crepe_bass_note_count, which counted a CREPE transcription that
+    # was computed and discarded, and which nothing ever read.
+    bass_octave_corrections: int = 0
     tempo_bpm: float = 0.0
     tempo_confidence: float = 0.0
     time_signature: tuple = (4, 4)
@@ -185,6 +191,7 @@ def transcribe_file(
         detection_onset_threshold: Optional[float] = None,
         detection_frame_threshold: Optional[float] = None,
         detection_min_note_ms: Optional[float] = None,
+        arbitrate_bass_octave: bool = False,
         routed_layout: bool = True,
         save_intermediate_path: Optional[Union[str, Path]] = None,
         university_mode: Union[str, "UniversityMode"] = "off",
@@ -392,7 +399,7 @@ def transcribe_file(
     pitched_notes: List[Note] = []
     bass_notes: List[Note] = []
     note_counts: Dict[str, int] = {}
-    crepe_bass_count = 0
+    bass_octave_corrections = 0
 
     drum_notes: List[Note] = []
     if separation.has_stem(StemType.DRUMS):
@@ -489,15 +496,50 @@ def transcribe_file(
 
         if stem == StemType.BASS:
             bass_notes = stem_notes
-            crepe_notes = transcribe_crepe_bass(engine, stem_track)
-            crepe_bass_count = len(crepe_notes)
+            # CREPE ARBITRATES THE OCTAVE. It used to be run here, counted, and
+            # thrown away - "logged, not merged." Not merging was right (two
+            # detectors emitting notes would double-count the bass), but the
+            # alternative to merging is arbitrating: Basic Pitch decides a note
+            # EXISTS, CREPE's unquantized f0 decides which octave it is in. The
+            # verdict is an annotation, so no frozen Note is rewritten (§2.2).
+            #
+            # OFF BY DEFAULT, and the CREPE pass is skipped with it. Measured,
+            # it corrects up to a fifth of the bass and rescues none of the
+            # physically impossible notes - safe but not yet useful, and the
+            # premise it was built on (a bass an octave flat) was refuted by
+            # re-measuring against sounding rather than written pitch. See the
+            # module header. Paying for a CREPE pass to then ignore it is the
+            # exact waste this replaced, so when the arbiter is off, CREPE
+            # does not run at all.
+            octave_fixes = []
+            if arbitrate_bass_octave:
+                times_ms, freq_hz = continuous_f0(engine, stem_track)
+                sampler = make_f0_sampler(times_ms, freq_hz)
+                octave_fixes = arbitrate_bass_octaves(stem_notes, sampler)
+            for fix in octave_fixes:
+                annotations.add(Annotation(
+                    note_id=fix.note_id, kind=BASS_OCTAVE_ANNOTATION_KIND,
+                    value={"corrected_pitch": fix.corrected_pitch,
+                           "original_pitch": fix.original_pitch,
+                           "crepe_midi": round(fix.crepe_midi, 2),
+                           "semitones": fix.semitones,
+                           "reason": fix.reason},
+                    source=Provenance.CREPE, confidence=1.0,
+                ))
+            bass_octave_corrections = len(octave_fixes)
+            down = sum(1 for f in octave_fixes if f.semitones > 0)
             music_box.log_decision(
-                stage_name="pitch_engine", decision_type="crepe_bass_witness",
-                before_state={}, after_state={"crepe_note_count": crepe_bass_count,
-                                               "basic_pitch_note_count": len(stem_notes)},
-                reasoning="CREPE's bass read is its own witness (§3) - Basic Pitch's notes are what's "
-                          "exported, so bass isn't double-counted; CREPE's read is logged, not merged.",
-                reversible=False,
+                stage_name="pitch_engine", decision_type="crepe_bass_octave_arbitration",
+                before_state={"basic_pitch_note_count": len(stem_notes)},
+                after_state={"corrected": bass_octave_corrections,
+                             "raised": down,
+                             "lowered": bass_octave_corrections - down},
+                reasoning="CREPE reads a continuous f0 over each Basic Pitch bass note's own "
+                          "span; where the two disagree by almost exactly an octave the note "
+                          "moves, and any other disagreement is left alone. Opt-in: measured, it "
+                          "has never rescued a physically impossible bass note, so it stays off "
+                          "until Clocks' stems exist to score it against a human bass line.",
+                reversible=True,
             )
 
         lines = resolve_instrument_identity(engine, stem_track, stem, stem_notes, annotations)
@@ -1607,7 +1649,7 @@ def transcribe_file(
         onset_refined_count=onset_refined_count,
         wobble_group_count=wobble_group_count,
         note_counts_by_stem=note_counts,
-        crepe_bass_note_count=crepe_bass_count,
+        bass_octave_corrections=bass_octave_corrections,
         tempo_bpm=tempo_resolution.tempo_meter.tempo_bpm,
         tempo_confidence=tempo_resolution.tempo_meter.confidence,
         time_signature=(meter_resolution.numerator, meter_resolution.denominator),

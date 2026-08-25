@@ -11,7 +11,7 @@ not have known, and where does that knowledge pay off retrospectively?*
 
 ---
 
-## The ten lessons, and where each one still applies
+## The eleven lessons, and where each one still applies
 
 ### 1. Put a fallible stage where its errors are cheap
 
@@ -206,6 +206,46 @@ The module reads raw fields because its input is already the resolved value.
 Recorded rather than deleted, because the scan itself is worth keeping and its
 false-positive mode is worth knowing: **"reads raw fields" only indicts a
 module whose input is a raw Note.**
+
+### 11. A reference is written in its own units — check them before comparing
+
+Added 2026-08-25. The bass was reported broken on this evidence: *"human bass
+41–60, ours 29–75 — we bottom a clean twelve semitones below the real floor."*
+It was wrong, and wrong in a way no amount of reading our own code could have
+caught, because the defect was in the **reference**, not the subject.
+
+Bass guitar is a transposing instrument. The published transcription's part
+carries `<transpose><octave-change>-1</octave-change></transpose>`: it is
+written an octave above where it sounds. Comparing its *written* pitches to our
+*sounding* pitches manufactured a twelve-semitone error out of nothing. Scored
+correctly:
+
+| | human (sounding) | ours |
+|---|---|---|
+| floor | 29 | **29** — exact match |
+| notes below floor | — | **0 (0%)** |
+| notes above ceiling | — | 52 (6%) |
+| median | 39 | 42 |
+
+Our bass floor was never wrong. The real defect is a three-semitone upward skew
+and a 6% tail above the ceiling, which looks like guitar and piano bleeding
+into the bass stem — a *separation* problem, not a *pitch* problem, and one
+that lesson 1 already predicts.
+
+**Generalise: a score is a document with units, not a list of pitches.**
+Before any part of a reference is used as ground truth, read its `<transpose>`,
+its `<divisions>`, and its key signature. Guitar sounds an octave down;
+clarinet, trumpet and horn are not in C; a percussion part has no pitch at all.
+Every one of those silently produces a confident, precise, wrong number.
+
+This one cost a module. `pitch_engine/bass_octave.py` was designed, built,
+tested and wired to fix an error that does not exist — kept, off by default,
+because the mechanism is sound and honest about what it has not yet shown.
+
+**Seventeen findings this stretch turned out to be a bad measurement rather
+than a bad implementation.** The headline ratio at the top of this document was
+eight; it keeps growing faster than the defect count, which is itself the
+finding.
 
 ---
 
