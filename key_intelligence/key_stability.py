@@ -65,8 +65,8 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from key_intelligence.key_detector import (
-    KeyResult, NOTE_TO_PITCH_CLASS, _MINOR_RELATIVE_MAJOR, chroma_from_notes,
-    detect_key,
+    KeyResult, NOTE_TO_PITCH_CLASS, _MINOR_RELATIVE_MAJOR, _key_pitch_classes,
+    chroma_from_notes, detect_key,
 )
 
 # Windows this long, hopped by half, so a modulation is visible in more than
@@ -222,12 +222,97 @@ def analyze_key_stability(
         detail += (" - this span does not hold one key, so the global reading "
                    "is a summary of it, not a fact about it")
 
+    # WHEN THE WINDOWS OUTVOTE THE GLOBAL READING, BELIEVE THE WINDOWS.
+    #
+    # Until now `key` was always the global reading and the windows only ever
+    # produced an agreement percentage - a number that said "this is probably
+    # wrong" without ever being allowed to say what would be right.
+    #
+    # The global reading is one correlation against one chroma average over
+    # the whole span, so on a piece that moves it can settle between two keys
+    # and match neither. A window is the same measurement over a span short
+    # enough to hold still. When a clear majority of windows share a tonal
+    # center the global reading does not, the mode is the better estimate.
+    #
+    # Measured on Clocks, whose pitch content is unambiguous (A natural absent,
+    # G present - an Ab-major collection): the global reading was Bb minor,
+    # which wants Gb, while 7 of 12 windows sat on the Ab/Eb collection that
+    # the notes actually spell.
+    #
+    # Deliberately conservative. It only fires when the span is already
+    # UNSTABLE, and only for a center holding a strict majority - so a piece
+    # that genuinely holds one key is never second-guessed, and a scatter of
+    # disagreeing windows with no clear winner leaves the global reading alone.
+    chosen_key = global_result.key
+    if not stable and per_window:
+        centers = Counter(k for _s, _e, k in per_window)
+        top_key, top_n = centers.most_common(1)[0]
+        if top_n > len(per_window) / 2.0 and not _same_tonal_center(
+                top_key, global_result.key):
+            detail += (f"; the windows outvote it - {top_n}/{len(per_window)} "
+                       f"read {top_key}, so that is reported instead of "
+                       f"{global_result.key}")
+            chosen_key = top_key
+            agree = sum(1 for _s, _e, k in per_window
+                        if _same_tonal_center(k, chosen_key))
+            agreement = agree / len(per_window)
+            confidence = global_result.confidence * agreement
+
+    # AND THE SCALE MUST CONTAIN THE NOTES ACTUALLY PLAYED.
+    #
+    # The window vote above is about WHERE the music sits; this is about
+    # WHICH NOTES it uses, and they fail differently. A correlation over a
+    # weighted chroma average can land on a key whose scale excludes a pitch
+    # class the piece leans on - and no amount of window agreement catches
+    # that, because every window shares the same bias.
+    #
+    # Measured on Clocks: the reading was Bb minor, which spells Gb and not G.
+    # The recording uses G on 8.5% of its notes and Gb on 2.3%. Bb minor is
+    # not a near-miss there, it is the wrong collection - and the windows were
+    # split 5-5-2, so the vote above correctly declined to overrule it.
+    #
+    # The test is deliberately blunt: among the keys the windows actually
+    # proposed, prefer the one whose seven pitch classes cover the most of
+    # what was played. It cannot invent a key nobody read, and it only moves
+    # when the margin is real.
+    if per_window:
+        histogram = Counter(int(n.pitch) % 12 for n in pitched)
+        total_pc = sum(histogram.values()) or 1
+
+        def coverage(key_name: str) -> float:
+            try:
+                members = _key_pitch_classes(key_name)
+            except Exception:
+                return 0.0
+            return sum(histogram[pc] for pc in members) / total_pc
+
+        candidates = {k for _s, _e, k in per_window} | {chosen_key}
+        best = max(candidates, key=coverage)
+        if coverage(best) > coverage(chosen_key) + SCALE_COVERAGE_MARGIN:
+            detail += (f"; {chosen_key} spells notes this recording does not "
+                       f"use - it covers {coverage(chosen_key):.0%} of what was "
+                       f"played against {best}'s {coverage(best):.0%}, so {best} "
+                       f"is reported")
+            chosen_key = best
+            agree = sum(1 for _s, _e, k in per_window
+                        if _same_tonal_center(k, chosen_key))
+            agreement = agree / len(per_window)
+            confidence = global_result.confidence * agreement
+
     return KeyStability(
-        key=global_result.key, raw_confidence=global_result.confidence,
+        key=chosen_key, raw_confidence=global_result.confidence,
         confidence=confidence, agreement=agreement, stable=stable,
         windows=tuple(per_window), cadence_key=cadence,
         cadence_agrees=cadence_agrees, notes=detail)
 
 
+# How much better a candidate's scale must fit the notes played before it
+# displaces the correlation's answer. Four points is comfortably above the
+# noise in a pitch-class histogram of a few thousand notes, and well below the
+# gap that separates a right collection from a wrong one.
+SCALE_COVERAGE_MARGIN = 0.04
+
+
 __all__ = ["KeyStability", "analyze_key_stability", "DEFAULT_WINDOWS",
+           "SCALE_COVERAGE_MARGIN",
            "STABLE_MIN_AGREEMENT", "CADENCE_NOTES"]

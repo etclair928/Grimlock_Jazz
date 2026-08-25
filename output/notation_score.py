@@ -63,6 +63,10 @@ class NotationNote:
     # which is why every non-triplet tuplet was silently flattened to the
     # nearest binary value on export.
     tuplet_divisor: Optional[int] = None
+    # Equal parts the BEAT was read as, binary or not. 2 means eighths, and
+    # the exporter must then snap this note's onset to the eighth grid rather
+    # than to the sixteenth lattice it used unconditionally until now.
+    subdivision: int = 4
     tie_start: bool = False   # tie_reconstruction: this note is held into the next same-pitch note
     tie_stop: bool = False    # ...and/or continues a tie from the previous one
     # Explicit engraving voice (1-based) when an upstream voicer has already
@@ -254,10 +258,12 @@ def build_notation_score(
         nt = annotations.latest_value(note.id, NOTATION_TIMING_ANNOTATION_KIND) if use_notation_timing else None
         is_tuplet = bool(nt.get("is_tuplet", False)) if nt else False
         tuplet_divisor = nt.get("tuplet_divisor") if nt else None
+        subdivision = int(nt.get("subdivision") or 4) if nt else 4
         buckets[key_tuple].append(NotationNote(
             pitch=note.pitch, start_ms=start_ms, end_ms=end_ms,
             velocity=note.velocity, source_note_id=note.id, is_tuplet=is_tuplet,
             tuplet_divisor=tuplet_divisor,
+            subdivision=subdivision,
         ))
         drum_flag[key_tuple] = is_drum
 
@@ -445,11 +451,16 @@ def build_routed_score(
         nt = annotations.latest_value(note.id, NOTATION_TIMING_ANNOTATION_KIND) if use_notation_timing else None
         is_tuplet = bool(nt.get("is_tuplet", False)) if nt else False
         tuplet_divisor = nt.get("tuplet_divisor") if nt else None
+        # Equal parts the beat was read as. 4 when unknown, which is the
+        # sixteenth lattice the exporter used unconditionally before this
+        # existed - so an intermediate written without it behaves as it did.
+        subdivision = int(nt.get("subdivision") or 4) if nt else 4
         acoustic = annotations.latest_value(note.id, ACOUSTIC_ACTIVITY_ANNOTATION_KIND)
         by_stem[note.stem].append(NotationNote(
             pitch=note.pitch, start_ms=start_ms, end_ms=end_ms,
             velocity=note.velocity, source_note_id=note.id, is_tuplet=is_tuplet,
             tuplet_divisor=tuplet_divisor,
+            subdivision=subdivision,
             cohesion=uni_cohesion.get(note.id),
             trailing_resonance=(acoustic or {}).get("trailing_resonance"),
             trailing_void=(acoustic or {}).get("trailing_void"),

@@ -1094,7 +1094,10 @@ def transcribe_file(
                 # page needs the NUMBER, not just the flag", the whole time.
                 value={"start_ms": beat_timing.notation_start_ms, "end_ms": beat_timing.notation_end_ms,
                        "reason": beat_timing.reason, "is_tuplet": beat_timing.is_tuplet,
-                       "tuplet_divisor": beat_timing.tuplet_divisor},
+                       "tuplet_divisor": beat_timing.tuplet_divisor,
+                       # A beat read as 2 parts is EIGHTHS. Without this the
+                       # exporter snaps every onset to a sixteenth lattice.
+                       "subdivision": beat_timing.subdivision},
                 source=Provenance.TEMPORAL_LATTICE,
             ))
             rhythm_inferred_count += 1

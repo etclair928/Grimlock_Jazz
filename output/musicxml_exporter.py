@@ -81,7 +81,8 @@ _representable_at_most = notatable_at_most
 _TERNARY_PREFERENCE_MARGIN = 1e-4
 
 
-def _snap_quarter_length(ql: float, allow_triplet: bool, divisor=None):
+def _snap_quarter_length(ql: float, allow_triplet: bool, divisor=None,
+                         subdivision: int = 4):
     """Snap a quarter-length to the 16th grid, or - when this note carried a
     beat-level TRIPLET VERDICT and the piece's ratio family permits tuplets -
     to whichever of the 16th and triplet grids is NEARER. The verdict comes
@@ -95,7 +96,27 @@ def _snap_quarter_length(ql: float, allow_triplet: bool, divisor=None):
     measure, and their differences are exactly the un-notatable leftovers that
     made music21 invent ratios like 24:13. "Allow" now means allow, not force.
     """
-    binary = round(ql * 4.0) / 4.0        # nearest 16th
+    # THE BINARY GRID IS THE BEAT'S OWN, not a fixed sixteenth lattice.
+    #
+    # This was `round(ql * 4.0) / 4.0` unconditionally - every onset in every
+    # song snapped to the nearest SIXTEENTH, whatever subdivision the beat had
+    # actually been read as. rhythm_inference decides that subdivision per beat
+    # and, until now, threw the number away on binary beats (it kept it only
+    # for tuplets), so the page had no way to know a beat was eighths.
+    #
+    # Measured on Clocks, whose published human transcription is 100% on the
+    # eighth grid and contains no sixteenth in 160 bars: our onsets landed on
+    # that grid 90.6% of the time and the page still came out 42% sixteenths,
+    # with 89% of those sixteenth noteheads sitting on CORRECT onsets. A
+    # sixteenth lattice invites sixteenth-length fragments even when every
+    # onset is right, because the gap to the next snapped onset can be a
+    # sixteenth.
+    #
+    # A beat read as 2 parts snaps to halves of a beat; as 4, to quarters. The
+    # fallback stays 4 so any caller that does not know the subdivision behaves
+    # exactly as before.
+    grid = max(1, int(subdivision or 4))
+    binary = round(ql * grid) / float(grid)
     if divisor:
         # This beat was READ as a `divisor`-part tuplet, so its own grid is the
         # right one to land on - and EXACTLY, as a Fraction. Summing a handful
@@ -134,13 +155,14 @@ def _snap_quarter_length(ql: float, allow_triplet: bool, divisor=None):
 
 def _offset_quarter_length(start_ms: float, origin_ms: float, tempo_bpm: float,
                            allow_triplet: bool = False, musical_time=None,
-                           divisor=None):
+                           divisor=None, subdivision: int = 4):
     if musical_time is not None and musical_time.usable:
         pos = musical_time.to_beats(start_ms) - musical_time.to_beats(origin_ms)
-        return max(0.0, _snap_quarter_length(pos, allow_triplet, divisor))
+        return max(0.0, _snap_quarter_length(pos, allow_triplet, divisor,
+                                            subdivision))
     ms_per_quarter = 60000.0 / max(tempo_bpm, 1.0)
     return max(0.0, _snap_quarter_length((start_ms - origin_ms) / ms_per_quarter,
-                                         allow_triplet, divisor))
+                                         allow_triplet, divisor, subdivision))
 
 
 # Denominator cap when converting a snapped offset to an exact Fraction. The
@@ -440,7 +462,8 @@ def _chord_events_gridded(
         allow = bool(nn.is_tuplet) or (ratio_family in _TERNARY_RATIO_FAMILIES)
         offset = _offset_quarter_length(nn.start_ms, origin_ms, tempo_bpm, allow,
                                         musical_time=musical_time,
-                                        divisor=getattr(nn, "tuplet_divisor", None))
+                                        divisor=getattr(nn, "tuplet_divisor", None),
+                                        subdivision=int(getattr(nn, "subdivision", 4) or 4))
         buckets.setdefault(round(offset, 6), []).append(nn)
     return [buckets[k] for k in sorted(buckets)]
 

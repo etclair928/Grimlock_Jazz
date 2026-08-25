@@ -92,6 +92,10 @@ class BeatFilling:
     onset_fractions: Tuple[float, ...]
     is_tuplet: bool
     readability_cost: float
+    # Equal parts this beat was read as, tuplet or not. `divisor` below is the
+    # TUPLET number and is None on a binary beat; this one is always set, and
+    # is what tells the page whether a beat is eighths (2) or sixteenths (4).
+    subdivision: int = 4
     # How many EQUAL parts this filling divides the beat into, when it does.
     # A bare is_tuplet flag says "not binary" but not "into how many", and the
     # page needs the number: a sextuplet's unit is 1/6 of a beat and a
@@ -366,6 +370,23 @@ def _filling_for(d, slots, swing_ratio: float = 0.5):
         is_tuplet=is_tuplet,
         readability_cost=cost,
         divisor=d if is_tuplet else None,
+        # THE BINARY SUBDIVISION, WHICH USED TO BE DISCARDED. `divisor` above
+        # is deliberately None on a binary beat, because it means "which
+        # tuplet". But the beat was still read as d equal parts, and the page
+        # needs that number: a beat read as 2 is EIGHTHS, and its onsets should
+        # snap to the eighth grid rather than to the sixteenth grid the
+        # exporter has always used unconditionally.
+        #
+        # Measured on Clocks, whose published human transcription is 100% on
+        # the eighth grid and contains no sixteenth at all in 160 bars: our
+        # onsets land on that grid 90.6% of the time and the page still comes
+        # out 42% sixteenths, because a correctly placed note gets cut to fit
+        # a sixteenth lattice nobody asked for. 89% of our sixteenth noteheads
+        # sit on correct onsets.
+        #
+        # Same class of bug as tuplet_divisor: computed, documented, dropped
+        # one line before the page could use it.
+        subdivision=d,
     )
 
 
@@ -451,6 +472,9 @@ class InferredNoteTiming:
     notation_end_ms: float
     reason: str
     is_tuplet: bool = False
+    # Equal parts the beat was read as, binary or not - 2 means the beat is
+    # EIGHTHS and its onsets must not be snapped to a sixteenth lattice.
+    subdivision: int = 4
     # Equal parts this beat was divided into (5 = quintuplet, 6 = sextuplet...).
     # None on a binary beat. The page needs the NUMBER, not just the flag - see
     # BeatFilling.divisor.
@@ -646,6 +670,7 @@ def infer_voice_rhythm(
                     notation_end_ms=end,
                     reason=reason,
                     is_tuplet=rhythm.filling.is_tuplet,
+                    subdivision=rhythm.filling.subdivision,
                     tuplet_divisor=rhythm.filling.divisor,
                 )
 

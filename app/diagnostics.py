@@ -193,6 +193,62 @@ def check_tuplets(musicxml_path: str) -> Dict[str, Any]:
     return measure_tuplets(musicxml_path)
 
 
+def check_rhythmic_vocabulary(musicxml_path: str,
+                              reference_path: Optional[str] = None) -> Dict[str, Any]:
+    """What note values does this page ask a reader to play?
+
+    THE MOST DIRECT MEASURE OF RHYTHMIC CORRECTNESS WE HAVE, and the only one
+    that needs no alignment, no DTW and no tolerance window - just a histogram
+    of what is written. On rigidly quantised material it is close to a
+    pass/fail.
+
+    Clocks is the case that motivated it. Its published human transcription is
+    75% eighths, 16% quarters, 8% wholes, 1% halves - and ZERO sixteenths, in
+    160 bars. So on that song any sixteenth is wrong by construction, and
+    Klangio's 21% sixteenth share is 21% of its page invented outright.
+
+    With a reference, returns the per-value gap. Without one, returns the
+    distribution alone - still useful, because the forbidden values (32nd and
+    finer) are wrong on any material.
+    """
+    from collections import Counter
+    import xml.etree.ElementTree as ET
+
+    def histogram(path: str) -> Counter:
+        counts: Counter = Counter()
+        for note in ET.parse(path).getroot().iter("note"):
+            if note.find("rest") is not None:
+                continue
+            value = (note.findtext("type") or "").strip()
+            if value:
+                counts[value] += 1
+        return counts
+
+    ours = histogram(musicxml_path)
+    total = sum(ours.values()) or 1
+    out: Dict[str, Any] = {
+        "ours": {k: round(100.0 * v / total, 1) for k, v in ours.items()},
+        "forbidden": sum(ours[k] for k in ("32nd", "64th", "128th")),
+        "notes": total,
+    }
+    if reference_path and os.path.exists(reference_path):
+        ref = histogram(reference_path)
+        ref_total = sum(ref.values()) or 1
+        out["reference"] = {k: round(100.0 * v / ref_total, 1) for k, v in ref.items()}
+        # The gap that matters: a value we write a lot of and the reference
+        # does not have at all is invention, not disagreement.
+        gaps = {}
+        for value in set(ours) | set(ref):
+            mine = 100.0 * ours.get(value, 0) / total
+            theirs = 100.0 * ref.get(value, 0) / ref_total
+            if abs(mine - theirs) >= 3.0:
+                gaps[value] = round(mine - theirs, 1)
+        out["gaps_pct"] = gaps
+        out["invented_values"] = sorted(v for v in ours if v not in ref and ours[v] > 0)
+        out["note_ratio"] = round(total / ref_total, 2)
+    return out
+
+
 # ---------------------------------------------------------------------
 # note-side checks (need the run's .pkl)
 # ---------------------------------------------------------------------
