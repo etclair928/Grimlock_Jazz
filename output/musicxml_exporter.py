@@ -35,6 +35,7 @@ from output.notation_score import NotationScore, NotationPart, NotationNote
 from fractions import Fraction
 from output.beat_hierarchy import split_for_hierarchy
 from quantization.duration_witness import nearest_notatable, notatable_at_most
+from output.ma_legato import calibrate_from_notes
 
 # music21 quarterLength is in quarter notes. ms -> quarterLength needs the
 # tempo: at T BPM one quarter note is 60000/T ms.
@@ -248,6 +249,15 @@ def _leading_tuplet_rest(onset, divisor: int):
 # time of 4, 5 in the time of 4, 7 in the time of 4, 12 in the time of 8.
 # A sixteenth, in quarter-lengths. The finest notehead this project will draw.
 _MIN_WRITTEN_VALUE = 0.25
+
+# How far a drum hit may be stretched to reach the next attack. One beat: past
+# that the gap is a real silence, and the published kit part writes it as a rest.
+_DRUM_MAX_FILL_QL = 1.0
+
+# The ordinary window a pitched gap may be closed by when Anechoic Ma has no
+# confident opinion - half a beat, the same blind default the page used before
+# the witness was consulted at all. A ringing gap earns RINGING_REACH x this.
+_MA_BASE_FILL_QL = 0.5
 
 
 def _writable_or_zero(ql: float) -> float:
@@ -661,6 +671,23 @@ def build_music21_score(score: NotationScore, grid_chords: bool = True):
         return (any(n.is_tuplet for n in event)
                 or score.ratio_family in _TERNARY_RATIO_FAMILIES)
 
+    # One calibration for the whole score: the resonance scale drifts between
+    # songs, so it must be read off THIS material. Drums contribute nothing
+    # (no Ma report) and simply do not appear in the distribution.
+    _ma_gate = calibrate_from_notes([n for pt in score.parts for n in pt.notes])
+
+    def _subdivision(event: List[NotationNote]) -> int:
+        """Equal parts the beat this event sits on was read as.
+
+        THE SHIPPING PATH DID NOT ASK FOR THIS. `subdivision` was added to
+        NotationNote, carried correctly from rhythm_inference, and consulted
+        only by _chord_events_gridded - so every onset and every duration the
+        exporter actually wrote went on the default sixteenth lattice, and the
+        fix that added it moved nothing. The beat's own reading is the grid.
+        """
+        vals = [int(getattr(n, "subdivision", 4) or 4) for n in event]
+        return max(vals) if vals else 4
+
     def _divisor(event: List[NotationNote]):
         """The subdivision THIS beat was read as, if any.
 
@@ -791,14 +818,22 @@ def build_music21_score(score: NotationScore, grid_chords: bool = True):
                 for event in voice_events:
                     triplet = _triplet(event)
                     divisor = _divisor(event)
+                    subdiv = _subdivision(event)
                     onset = _offset_quarter_length(
                         min(n.start_ms for n in event), origin_ms, score.tempo_bpm, triplet,
-                        musical_time=score.musical_time, divisor=divisor)
+                        musical_time=score.musical_time, divisor=divisor,
+                        subdivision=subdiv)
                     end = _offset_quarter_length(
                         max(n.end_ms for n in event), origin_ms, score.tempo_bpm, triplet,
-                        musical_time=score.musical_time, divisor=divisor)
+                        musical_time=score.musical_time, divisor=divisor,
+                        subdivision=subdiv)
+                    # The floor is the beat's OWN subdivision, not a sixteenth.
+                    # On a beat read as two, nothing finer than an eighth may be
+                    # written - which is what stops a note being engraved as a
+                    # 16th and the remainder of its eighth becoming a rest.
                     min_grid = (Fraction(1, divisor) if divisor
-                                else (1.0 / 3.0) if triplet else 0.25)
+                                else (1.0 / 3.0) if triplet
+                                else max(0.25, 1.0 / max(1, subdiv)))
                     el = _make_element(event, is_drum=part.is_drum)
                     # Snap the DURATION onto the same grid as the onset, rather
                     # than just subtracting two snapped points. A difference of
@@ -828,12 +863,15 @@ def build_music21_score(score: NotationScore, grid_chords: bool = True):
                             continue
                     else:
                         el.quarterLength = _ql
-                    placed.append([onset, el, triplet, divisor])
+                    # `event` is carried through: the Ma gate below needs THIS
+                    # event's own acoustic evidence, and reading the first loop's
+                    # leftover variable silently gave every note the last one's.
+                    placed.append([onset, el, triplet, divisor, event])
                 placed.sort(key=lambda oe: oe[0])
                 # How far into the voice real content already reaches, so a
                 # frame-marker rest is never written over an existing note.
                 _voice_filled_to = float("-inf")
-                for i, (onset, el, triplet, divisor) in enumerate(placed):
+                for i, (onset, el, triplet, divisor, event) in enumerate(placed):
                     if i + 1 < len(placed):
                         gap = placed[i + 1][0] - onset
                         # Clamp THROUGH _representable, not straight to `gap`.
@@ -855,6 +893,54 @@ def build_music21_score(score: NotationScore, grid_chords: bool = True):
                                     continue
                             else:
                                 el.quarterLength = _clamped
+                        # A DRUM HIT IS AN IMPULSE, AND ITS SILENCE IS NOT A
+                        # REST. An unpitched notehead marks an ATTACK; its
+                        # written length is nominal, so the convention is to
+                        # write the value that reaches the next attack. Left
+                        # alone, every hit was engraved at the grid floor and
+                        # the remainder of its beat became a rest: on Clocks
+                        # the kit came out 100% sixteenth notes and 1069
+                        # sixteenth rests, where the published transcription
+                        # writes it as 100% eighths and NO sixteenth rests.
+                        # 1069 of our 1120 note-then-rest pairs were here.
+                        #
+                        # Clamped to the beat frame, so a fill can never cross
+                        # a beat - and since a beat never spans a barline, it
+                        # can never cross one of those either. Capped at one
+                        # beat so a genuine silence between hits stays the rest
+                        # it really is; the published kit part writes 430 of
+                        # them and those are real.
+                        elif (part.is_drum and not divisor
+                              and gap > 0 and el.quarterLength < gap):
+                            _fill = _representable_at_most(
+                                min(gap, _DRUM_MAX_FILL_QL), triplet, divisor=None)
+                            _fill = _clamp_to_beat_frame(onset, _fill)
+                            if _fill > el.quarterLength:
+                                el.quarterLength = _fill
+                        # ANECHOIC MA GATES EVERY OTHER REST ON THE PAGE. Basic
+                        # Pitch's note ends are cut-offs, not releases, so the
+                        # leftover of a beat became a rest nobody performs. Ma
+                        # already measured whether that gap is still ringing or
+                        # genuinely silent, on every pitched note of every run,
+                        # and only the piano staff ever read it. A ringing gap
+                        # is closed toward the next attack; a silent one is a
+                        # real rest and is left exactly as it is.
+                        elif (not divisor and gap > 0
+                              and el.quarterLength < gap and not _ma_gate.blind):
+                            _res = max((n.trailing_resonance for n in event
+                                        if n.trailing_resonance is not None),
+                                       default=None)
+                            _void = max((n.trailing_void for n in event
+                                         if n.trailing_void is not None),
+                                        default=None)
+                            _reach = _ma_gate.limit(_res, _void, _MA_BASE_FILL_QL)
+                            if _reach > 0:
+                                _fill = _representable_at_most(
+                                    min(gap, el.quarterLength + _reach),
+                                    triplet, divisor=None)
+                                _fill = _clamp_to_beat_frame(onset, _fill)
+                                if _fill > el.quarterLength:
+                                    el.quarterLength = _fill
                     if el.quarterLength <= 0:
                         continue
 
