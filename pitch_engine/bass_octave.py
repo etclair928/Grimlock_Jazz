@@ -34,26 +34,32 @@
 # ceiling, which looks like guitar and piano bleeding into the bass stem rather
 # than an octave error at all.
 #
-# SO WHY IS THIS STILL HERE, AND WHY IS IT OFF. Measured on three songs with
-# bass stems on disk, against the one criterion available without per-note
-# ground truth - a bass cannot sound below a five-string's low B (MIDI 23):
+# MEASURED AGAINST GROUND TRUTH, AND IT SHIPS ON. Clocks is the one song with
+# a per-note human bass. Aligning our bass to it IN TIME and asking, for each
+# note, whether it sits in the same octave as the human note sounding at that
+# moment - pitch class ignored, because octave is the only thing this module
+# can change and therefore the only thing it can get wrong:
 #
-#   song     bass notes   corrected   impossible notes rescued   high notes pulled down
-#   HRV            312    51 (16%)                          0    1 of 12
-#   Grey           715   140 (20%)                          0    1 of  3
-#   Copper          70     1 ( 1%)                          0    0 of  2
+#   comparable notes (a human bass note of the same pitch class sounding)  519
+#   octave correct BEFORE                                       376  (72.4%)
+#   octave correct AFTER                                        473  (91.1%)
+#   octave errors fixed                                         118
+#   correct notes broken                                         21
 #
-# It never creates a physically impossible note, so it is safe. It also never
-# fixes one, so it is not yet useful. Moving a fifth of the bass to fix one
-# note is not a trade worth making by default, and that is why
-# `arbitrate_bass_octaves` is opt-in: the mechanism is built, tested and wired,
-# and it stays dark until evidence says it helps.
+# +18.7 points, 5.6 fixes per break. By the independent range test it moves 8
+# notes into the human's register, moves NONE out, and takes our median from 42
+# to exactly the human's 39.
 #
-# WHAT WOULD SETTLE IT. Clocks is the only song with a per-note human bass, and
-# its stems are not on disk - the arbiter has never been run against ground
-# truth. Separate Clocks once, keep the stems, and score the corrections note
-# by note against the sounding-pitch bass line. That measurement decides
-# whether this ships on, and nothing else should.
+# SO THE BASS DID HAVE AN OCTAVE PROBLEM - 27.6% of it - RUNNING THE OTHER WAY.
+# The header above is kept because the correction is the useful part: the error
+# is upward, not downward, which is Basic Pitch locking onto the second
+# harmonic rather than missing a fundamental. Every earlier attempt to justify
+# this module argued from the downward story and measured nothing, and the
+# aggregate tests that came first (in-range counts, pitch-class distance) could
+# not discriminate at all - pitch-class distance is IDENTICAL before and after,
+# necessarily, since an octave correction preserves pitch class. Only the
+# time-aligned test could answer the question, and it should have been the
+# first one run.
 #
 # WHY ONLY OCTAVES. A disagreement of twelve semitones between a monophonic
 # tracker and a polyphonic detector is an octave error, which is the specific

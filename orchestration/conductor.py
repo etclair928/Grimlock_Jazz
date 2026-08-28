@@ -191,7 +191,7 @@ def transcribe_file(
         detection_onset_threshold: Optional[float] = None,
         detection_frame_threshold: Optional[float] = None,
         detection_min_note_ms: Optional[float] = None,
-        arbitrate_bass_octave: bool = False,
+        arbitrate_bass_octave: bool = True,
         routed_layout: bool = True,
         save_intermediate_path: Optional[Union[str, Path]] = None,
         university_mode: Union[str, "UniversityMode"] = "off",
@@ -503,14 +503,15 @@ def transcribe_file(
             # EXISTS, CREPE's unquantized f0 decides which octave it is in. The
             # verdict is an annotation, so no frozen Note is rewritten (§2.2).
             #
-            # OFF BY DEFAULT, and the CREPE pass is skipped with it. Measured,
-            # it corrects up to a fifth of the bass and rescues none of the
-            # physically impossible notes - safe but not yet useful, and the
-            # premise it was built on (a bass an octave flat) was refuted by
-            # re-measuring against sounding rather than written pitch. See the
-            # module header. Paying for a CREPE pass to then ignore it is the
-            # exact waste this replaced, so when the arbiter is off, CREPE
-            # does not run at all.
+            # ON, on evidence. Scored per-note against Clocks' human bass by
+            # time alignment, it takes octave accuracy from 72.4% to 91.1% -
+            # 118 errors fixed against 21 broken. It stayed off until that
+            # measurement existed, and the aggregate tests tried first could
+            # not have produced it: an octave correction preserves pitch class,
+            # so pitch-class distance is identical before and after by
+            # construction. Turning it off also skips the CREPE pass entirely,
+            # since paying for a read to then ignore it is the waste this
+            # replaced.
             octave_fixes = []
             if arbitrate_bass_octave:
                 times_ms, freq_hz = continuous_f0(engine, stem_track)
