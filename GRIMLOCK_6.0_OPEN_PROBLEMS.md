@@ -2749,3 +2749,97 @@ and also flagged `piano_reduction` and the wobble pass, both of which turned out
 to be working correctly. The scan is a candidate generator, not a verdict, and
 the discipline that separates the two is the only reason the fixes in this
 section are trustworthy.
+
+---
+
+# XXV. The Clocks session — the page became readable, and four verdicts were being thrown away
+
+Measured end to end on the full pipeline, matched detection thresholds
+(onset 0.6 / frame 0.45 / min_note 107ms) so the only variable is the work.
+
+| | human | before | **after** |
+|---|---|---|---|
+| eighth notes | 77.6% | 32.2% | **63.0%** |
+| 16th notes | 0.0% | 41.7% | **7.4%** |
+| 16th rests | 0 | 1347 | **228** |
+| total rests | 1037 | 2767 | **1443** |
+| 32nd rests | 0 | 6 | **0** |
+| illegal tuplets | 0 | 1 | **0** |
+| key signature | −4 (Ab) | −5 (Bbm) | **−4 (Ab)** |
+| bass octave, as engraved | — | 63.5% | **94.6%** |
+
+Tempo 130.0 exact and 4/4 throughout, unchanged.
+
+## XXV.1 What was actually wrong
+
+**The kit, not the harmony.** 79% of our sixteenth notes were followed
+immediately by a sixteenth rest — 1120 pairs, the most common adjacency on the
+page — and **1069 of them were drums**. A drum hit is an impulse: the notehead
+marks an attack and its written length is nominal, so it is engraved out to the
+next attack. Ours sat at the grid floor with the remainder of the beat left as a
+rest. The kit is now 100% eighths against the published transcription's 100%
+eighths.
+
+**The subdivision fix from the previous session had never run.** `subdivision`
+reached only `_chord_events_gridded`; both `_offset_quarter_length` calls on the
+path that writes every onset and duration used the default sixteenth lattice.
+The same two-site trap that cost a 39-minute run, in a different file.
+
+**Anechoic Ma was gating one staff.** It measures resonance vs genuine silence
+on the trailing gap of every pitched note of every run, and only
+`piano_reduction` read it. Extracted to `output/ma_legato.py`; it now gates
+every part, keeping the percentile calibration that module had already paid for
+(resonance occupies ~[0.23, 0.72], so absolute thresholds are inert).
+
+## XXV.2 The register of verdicts computed and never read
+
+This session added **four** entries, bringing the register to seven:
+
+| verdict | written | read by | fixed |
+|---|---|---|---|
+| `tuplet_divisor` | every run | nothing | earlier |
+| `RANGE_ANNOTATION_KIND` | since 2026-08-06 | nothing | earlier |
+| CREPE's bass read | every run | counted, discarded | **yes** |
+| Ma's trailing gap | every run | piano staff only | **yes** |
+| `stability.key` | every run, with reasoning | confidence only | **yes** |
+| repair-pass write condition | — | named its keys | **yes** |
+| `DURATION_ANNOTATION_KIND` | every run | nothing | open |
+
+The key one is the sharpest. `analyze_key_stability` wrote *"Bbm spells notes
+this recording does not use — it covers 92% of what was played against Ab's
+97%, so Ab is reported"* into the trail on every single run, and the Conductor
+took its confidence and dropped its key. The page said Bbm throughout.
+
+## XXV.3 The bass, resolved after three wrong answers
+
+| attempt | claim | outcome |
+|---|---|---|
+| 1 | reads 12 semitones flat | **wrong** — compared a transposing part's *written* pitch to our *sounding* pitch |
+| 2 | no octave problem at all | **wrong** — true of the floor, false of the notes |
+| 3 | 27.6% wrong octave, running *upward* | **confirmed** against the human bass |
+
+The error is Basic Pitch locking onto the second harmonic, which is precisely
+what a monophonic f0 tracker is positioned to catch. Time-aligned per note:
+72.4% → 91.1%; as engraved, 63.5% → 94.6%.
+
+**Why it took three tries is the durable finding.** Every aggregate metric tried
+first was structurally unable to answer: notes-in-range moved 0.8 points,
+impossible-note counts moved zero, and pitch-class distance was *identical
+before and after by construction*, because an octave correction preserves pitch
+class. That number was reported as evidence. See audit lesson 12.
+
+## XXV.4 Still open
+
+1. **Pitched parts at 7.4% sixteenths** against the human's 0%, and 1443 rests
+   against 1037. The kit fix does not touch this. 273 Ma fills are still
+   declined for reasons not yet diagnosed.
+2. **Unrepresentable gaps.** A confounded run produced 33 rests music21
+   expressed as 12:7 and 12:11. `musicxml_repair` now rewrites such rests, but
+   only when the duration decomposes exactly into ordinary values — it refuses
+   to approximate, so these survive. The real fix is upstream: stop creating a
+   gap whose length cannot be written.
+3. **Detect-once-attribute-after** — still the largest available change, still
+   not run end to end.
+4. **Chopin's tempo** 26% fast (70 vs 55.4 implied).
+5. **`detect_pickup`** written, exported, never called — an eighth register
+   entry waiting to happen.
