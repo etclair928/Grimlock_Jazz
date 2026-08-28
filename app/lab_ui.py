@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import threading
 import tkinter as tk
 from tkinter import filedialog, ttk
 
@@ -42,7 +43,13 @@ class LabWindow(ttk.Frame):
         ttk.Label(self, textvariable=self.status, foreground="#555",
                   wraplength=1000, justify="left").grid(
             row=4, column=0, sticky="w", pady=(6, 0))
-        self.refresh()
+        # LOADED AFTER THE WINDOW EXISTS, NOT BEFORE IT. list_runs() unpickles
+        # every intermediate in transcriptions/ for its summary fields, and
+        # several are 7-16MB - measured at 28.8 seconds, all of it spent before
+        # Tk had drawn anything. Launched from the desktop icon that is over
+        # half a minute of nothing on screen, which is indistinguishable from a
+        # shortcut that does not work.
+        self.refresh(async_load=True)
 
     # -------------------------------------------------------------- widgets
     def _build_runs(self) -> None:
@@ -108,8 +115,35 @@ class LabWindow(ttk.Frame):
     def _selected(self):
         return [self._runs[int(i)] for i in self.runs.selection()]
 
-    def refresh(self) -> None:
-        self._runs = list_runs()
+    def refresh(self, async_load: bool = False) -> None:
+        """Reload the run list.
+
+        `async_load` reads the intermediates on a worker thread so the window
+        can be shown first. Tk is not thread-safe, so the worker only computes
+        - every widget touch is marshalled back with after(). The button keeps
+        the synchronous path, where the user asked for it and is watching.
+        """
+        if not async_load:
+            self._apply_runs(list_runs())
+            return
+
+        self.status.set("reading intermediates...")
+        for row in self.runs.get_children():
+            self.runs.delete(row)
+
+        def work() -> None:
+            try:
+                found = list_runs()
+            except Exception as exc:                       # noqa: BLE001
+                message = f"could not list runs: {exc}"
+                self.after(0, lambda: self.status.set(message))
+                return
+            self.after(0, lambda: self._apply_runs(found))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _apply_runs(self, found) -> None:
+        self._runs = found
         for row in self.runs.get_children():
             self.runs.delete(row)
         for i, record in enumerate(self._runs):
