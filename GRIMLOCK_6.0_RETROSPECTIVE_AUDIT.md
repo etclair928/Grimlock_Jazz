@@ -11,7 +11,7 @@ not have known, and where does that knowledge pay off retrospectively?*
 
 ---
 
-## The eleven lessons, and where each one still applies
+## The thirteen lessons, and where each one still applies
 
 ### 1. Put a fallible stage where its errors are cheap
 
@@ -246,6 +246,57 @@ because the mechanism is sound and honest about what it has not yet shown.
 than a bad implementation.** The headline ratio at the top of this document was
 eight; it keeps growing faster than the defect count, which is itself the
 finding.
+
+### 12. Score the property the pass actually changes
+
+Added 2026-08-28, from the bass. `bass_octave.py` changes exactly one thing:
+which octave a note sits in. It was judged first by notes-in-range (+0.8
+points), then by counts of physically impossible notes (zero movement), then by
+pitch-class distance — which was **identical before and after, necessarily**,
+because an octave correction preserves pitch class by construction. That number
+was reported as evidence. It could not have been anything else.
+
+The test that answered it aligned our bass to the human's in TIME and asked,
+per note, whether it sat in the same octave as the human note sounding at that
+moment:
+
+| | before | after |
+|---|---|---|
+| octave correct | 72.4% | **91.1%** |
+| fixed / broken | — | 118 / 21 |
+
+**Generalise: a metric that is mathematically insensitive to the change under
+test will report "no effect" no matter how large the effect is.** Before
+measuring, ask what property the pass alters and whether the metric can see it.
+Aggregate distributions are the usual offenders — they are cheap, they look
+rigorous, and they routinely cannot discriminate.
+
+The corollary bit twice here: two full sessions concluded the bass was fine (or
+broken in the opposite direction) on aggregate evidence alone.
+
+### 13. A verdict that only damps confidence cannot fix a label
+
+Also 2026-08-28. `analyze_key_stability` grew a scale-coverage guard that
+correctly found Clocks' global reading of Bbm to be wrong — "Bbm spells notes
+this recording does not use; it covers 92% of what was played against Ab's
+97%." It wrote that verdict, with its full reasoning, into the MusicBox trail
+on every run. The Conductor read `stability.confidence` and discarded
+`stability.key`, so **the page said Bbm through every run** while the trail
+explained why it should say Ab. The published transcription is in Ab.
+
+Reported last session as "Clocks moves Bbm to Ab." That was measured on the
+function in isolation and never on the pipeline — lesson 6 again, and this time
+self-inflicted.
+
+Now wired, and safe because it is selective rather than trusted: across seven
+songs it changes two and leaves Chopin (B), Burden (F), HRV (Bm), Grey (Gm) and
+YSGS (Cm) untouched. When the guards do not fire, `stability.key` IS the global
+reading and the assignment is a no-op.
+
+**This is the fourth "computed and read by nothing" in the register**, after
+`tuplet_divisor`, `RANGE_ANNOTATION_KIND`, and a repair pass whose write
+condition named its stat keys. The pattern is not an accident of any one
+author: a verdict is easy to compute, easy to log, and invisible when unread.
 
 ---
 

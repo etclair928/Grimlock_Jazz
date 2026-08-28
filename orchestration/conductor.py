@@ -573,11 +573,28 @@ def transcribe_file(
         # returned 0.84 for D# minor on a 180-second EXCERPT of a B major
         # piece - and that reading is correct for the excerpt, because the
         # published edition reads D# minor over the same span. What was wrong
-        # was the certainty. The reported key is never overridden here; only
-        # its confidence is damped, and the windows are logged so a modulation
-        # can be pointed at instead of averaged away.
+        # was the certainty, which is why this began as a confidence damper
+        # that never touched the key.
+        #
+        # IT NOW REPORTS THE KEY TOO, because the damper grew a guard that
+        # decides a different question. Its scale-coverage test asks whether
+        # the global reading spells notes the recording does not use: on
+        # Clocks, Bbm covers 92% of what was played against Ab's 97%, and the
+        # published transcription is in Ab (four flats). The verdict was being
+        # computed, written into the trail with its full reasoning, and thrown
+        # away - the key on the page stayed Bbm through every run.
+        #
+        # Safe because it is selective, not because it is trusted. Across the
+        # corpus it changes 2 songs of 7 and leaves Chopin (B), Burden (F),
+        # HRV (Bm), Grey (Gm) and YSGS (Cm) exactly as they were. When the
+        # guards do not fire, stability.key IS the global reading and this
+        # assignment is a no-op.
         stability = analyze_key_stability(pitched_notes)
         findings.key_confidence = stability.confidence
+        if stability.key and stability.key != key_result.key:
+            key_result = KeyResult(key=stability.key,
+                                   confidence=stability.confidence)
+            findings.key = stability.key
         music_box.log_decision(
             stage_name="key_intelligence", decision_type="key_stability",
             before_state={"key": stability.key,
