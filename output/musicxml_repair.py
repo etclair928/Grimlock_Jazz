@@ -85,7 +85,7 @@ def repair_measures(path: str) -> Dict[str, int]:
     tree = ET.parse(path)
     root = tree.getroot()
     stats = {"rests_trimmed": 0, "rests_removed": 0, "notes_overrunning": 0,
-             "whole_rests_disambiguated": 0}
+             "whole_rests_disambiguated": 0, "illegal_tuplet_rests_rewritten": 0}
 
     for part in root.findall(".//part"):
         divisions = 0
@@ -126,6 +126,31 @@ def repair_measures(path: str) -> Dict[str, int]:
 
                 rest_el = element.find("rest")
                 if rest_el is not None and duration > 0:
+                    # A REST INSIDE AN IMPOSSIBLE TUPLET. music21's
+                    # makeRests(fillGaps=True) must express every gap it finds,
+                    # and when a gap's length is not a writable value it reaches
+                    # for a tuplet that can hold it - producing half rests
+                    # marked 12:7 and 12:11 on Clocks, 33 of them. A tuplet of
+                    # 12 is barred outright, and 12-in-the-time-of-7 is not
+                    # notation any reader can act on.
+                    #
+                    # The duration in `<duration>` is already the true sounding
+                    # length in divisions, so rewriting it as ordinary rest
+                    # pieces of the same total keeps every following onset
+                    # exactly where it is. If it cannot be decomposed exactly
+                    # the original is left alone - _unambiguous_rest_pieces
+                    # returns [] rather than approximating, because a rest of
+                    # the wrong length is worse than an ugly one.
+                    tm = element.find("time-modification")
+                    if tm is not None:
+                        actual = _int_text(tm.find("actual-notes"), 0)
+                        if actual not in (0, 2, 3, 6):
+                            pieces = _unambiguous_rest_pieces(duration, divisions)
+                            if pieces:
+                                _replace_rest(measure, element, pieces)
+                                stats["illegal_tuplet_rests_rewritten"] += 1
+                                cursor += duration
+                                continue
                     type_el = element.find("type")
                     is_whole = (type_el is not None
                                 and (type_el.text or "").strip() == "whole")
@@ -163,8 +188,12 @@ def repair_measures(path: str) -> Dict[str, int]:
                         stats["notes_overrunning"] += 1
                 cursor += duration
 
-    if any(stats[k] for k in ("rests_trimmed", "rests_removed",
-                              "whole_rests_disambiguated")):
+    # ANY change means the file must be rewritten. This used to enumerate the
+    # stat keys by name, so adding a repair pass and forgetting to extend the
+    # list left the pass firing, counting its work, and writing nothing - which
+    # is exactly what happened to illegal_tuplet_rests_rewritten. Reading every
+    # counter makes the next pass impossible to wire up wrong.
+    if any(stats.values()):
         _write_preserving_doctype(tree, path)
     return stats
 

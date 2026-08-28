@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import xml.etree.ElementTree as ET
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -143,3 +144,57 @@ def test_a_file_needing_nothing_is_not_rewritten():
     before = os.path.getmtime(path)
     repair_measures(path)
     assert os.path.getmtime(path) == before
+
+
+# ---------------------------------------------------------------- illegal tuplet rests
+
+_ILLEGAL_TUPLET_REST = """<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1"><part-list><score-part id="P1"><part-name>t</part-name>
+</score-part></part-list><part id="P1"><measure number="1">
+<attributes><divisions>24</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+<note><rest/><duration>48</duration><voice>1</voice><type>half</type>
+  <time-modification><actual-notes>12</actual-notes><normal-notes>7</normal-notes></time-modification></note>
+<note><rest/><duration>48</duration><voice>1</voice><type>half</type></note>
+</measure></part></score-partwise>"""
+
+
+def _write_tmp(tmp_path, xml):
+    path = os.path.join(str(tmp_path), "s.musicxml")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(xml)
+    return path
+
+
+def test_illegal_tuplet_rest_is_rewritten(tmp_path):
+    """A rest music21 expressed as 12-in-the-time-of-7. The duration is already
+    the true sounding length, so rewriting it as ordinary rests of the same
+    total leaves every following onset exactly where it was."""
+    path = _write_tmp(tmp_path, _ILLEGAL_TUPLET_REST)
+    stats = repair_measures(path)
+    assert stats["illegal_tuplet_rests_rewritten"] == 1
+
+    tree = ET.parse(path)
+    for note in tree.getroot().iter("note"):
+        assert note.find("time-modification") is None
+    total = sum(int(n.findtext("duration")) for n in tree.getroot().iter("note"))
+    assert total == 96, "the measure must still hold exactly as much time"
+
+
+def test_a_legal_triplet_rest_is_left_alone(tmp_path):
+    """Triplets are ordinary notation and must survive untouched - the pass
+    removes what cannot be read, not every tuplet it meets."""
+    xml = _ILLEGAL_TUPLET_REST.replace(
+        "<actual-notes>12</actual-notes><normal-notes>7</normal-notes>",
+        "<actual-notes>3</actual-notes><normal-notes>2</normal-notes>")
+    path = _write_tmp(tmp_path, xml)
+    stats = repair_measures(path)
+    assert stats["illegal_tuplet_rests_rewritten"] == 0
+
+
+def test_any_counter_triggers_the_write(tmp_path):
+    """The write condition used to name its keys, so a new pass could fire,
+    count its work and write nothing. Guards against that returning."""
+    path = _write_tmp(tmp_path, _ILLEGAL_TUPLET_REST)
+    repair_measures(path)
+    with open(path, encoding="utf-8") as fh:
+        assert "actual-notes" not in fh.read()
