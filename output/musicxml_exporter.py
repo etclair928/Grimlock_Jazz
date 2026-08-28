@@ -214,6 +214,55 @@ def _clamp_to_beat_frame(onset, ql):
     return min(float(ql), frame_end - float(onset))
 
 
+def _close_unwritable_gaps(m_voice) -> int:
+    """Close gaps too short to be written, by holding the previous note.
+
+    WHY THIS EXISTS. split_for_hierarchy never lengthens a note, so when a
+    duration cannot be tiled exactly it drops the residue - correctly, because
+    growing a note pushes the next onset. But the residue leaves a GAP, and the
+    makeRests(fillGaps=True) call downstream fills every gap with whatever
+    music21 can find for it. Handed 1/12 of a beat it writes a 32nd triplet
+    rest, and one leftover on Clocks came out as a tuplet of 12 - both barred
+    outright, and both present in every export including the shipped one.
+
+    A gap shorter than a sixteenth is not a rest anybody performs; it is the
+    previous note still sounding. Holding that note is also the only move here
+    that CANNOT push anything: the following onset is already fixed, and the
+    fill is bounded by it, so nothing downstream shifts. Gaps a sixteenth or
+    longer are real and are left completely alone.
+
+    Skips tuplet members - their frame is anchored to a beat and is not this
+    pass's business - and any extension whose result would not be a writable
+    value, since replacing an unwritable rest with an unwritable note would
+    only move the defect.
+    """
+    closed = 0
+    items = sorted(m_voice.notesAndRests, key=lambda e: (float(e.offset),
+                                                         float(e.quarterLength)))
+    for cur, nxt in zip(items, items[1:]):
+        end = float(cur.offset) + float(cur.quarterLength)
+        gap = float(nxt.offset) - end
+        if gap <= 1e-9 or gap >= _MIN_WRITTEN_VALUE - 1e-9:
+            continue
+        wanted = float(nxt.offset) - float(cur.offset)
+        # Tuplet members are where these gaps actually live - an unfilled slot
+        # inside a triplet frame is what makeRests turns into a 32nd triplet
+        # rest. Their arithmetic is not ours to reason about, so the extension
+        # is TRIED and reverted unless music21 resolves it to a value the page
+        # is allowed to show. Skipping them entirely (the first version of this
+        # pass) closed nothing at all, which is how they were found.
+        before = cur.quarterLength
+        try:
+            cur.quarterLength = wanted
+        except Exception:
+            continue
+        if _writable_frame_marker(cur):
+            closed += 1
+        else:
+            cur.quarterLength = before
+    return closed
+
+
 def _leading_tuplet_rest(onset, divisor: int):
     """The tuplet rest that holds the frame on the beat when the first sounding
     slot is not slot 0 - a rest on "Tri" before a note on "ple".
@@ -241,7 +290,38 @@ def _leading_tuplet_rest(onset, divisor: int):
     # is not anchored here, which the tuplet audit will report honestly.
     if _apply_tuplet(rest, silent, divisor) <= 0:
         return None
+    # ENFORCED ON THE WRITTEN RESULT, not on the length that went in. The
+    # intent above was always "too short to write means no rest", but it was
+    # checked before music21 chose a note type, and music21 still resolved
+    # some frames to a 32nd triplet rest or a 12-tuplet - nine of them on
+    # Clocks, in every version including the shipped one. A 32nd and a tuplet
+    # of 12 are both barred outright (GRIMLOCK_6.0_DESIGN_DECISIONS, the
+    # notation rules): if the frame marker cannot be written in the ordinary
+    # vocabulary, the frame simply is not anchored here, which is exactly what
+    # this function already says it should do.
+    if not _writable_frame_marker(rest):
+        return None
     return float(beat_start), rest
+
+
+# The page's whole legal vocabulary for a frame-marker rest. A 32nd or finer is
+# never acceptable, and a tuplet that is not a duplet, triplet or sextuplet
+# means the beat grid is wrong rather than the note being unusual.
+_FORBIDDEN_WRITTEN_TYPES = frozenset({"32nd", "64th", "128th", "256th"})
+_ALLOWED_TUPLET_ACTUALS = frozenset({2, 3, 6})
+
+
+def _writable_frame_marker(el) -> bool:
+    """Is this rest something the ordinary vocabulary can actually show?"""
+    try:
+        if el.duration.type in _FORBIDDEN_WRITTEN_TYPES:
+            return False
+        for t in (el.duration.tuplets or ()):
+            if int(t.numberNotesActual) not in _ALLOWED_TUPLET_ACTUALS:
+                return False
+    except Exception:
+        return False
+    return True
 
 
 # Which "in the time of" a subdivision is written against: the largest power of
@@ -258,6 +338,11 @@ _DRUM_MAX_FILL_QL = 1.0
 # confident opinion - half a beat, the same blind default the page used before
 # the witness was consulted at all. A ringing gap earns RINGING_REACH x this.
 _MA_BASE_FILL_QL = 0.5
+
+# Telemetry for the two fills above. A pass that silently does nothing is the
+# failure mode these counters exist to make impossible - the same reason
+# onset_refined_count and wobble_group_count are surfaced on PipelineResult.
+LAST_FILL_STATS: Dict[str, int] = {}
 
 
 def _writable_or_zero(ql: float) -> float:
@@ -675,6 +760,9 @@ def build_music21_score(score: NotationScore, grid_chords: bool = True):
     # songs, so it must be read off THIS material. Drums contribute nothing
     # (no Ma report) and simply do not appear in the distribution.
     _ma_gate = calibrate_from_notes([n for pt in score.parts for n in pt.notes])
+    LAST_FILL_STATS.clear()
+    LAST_FILL_STATS.update(drum_filled=0, ma_seen=0, ma_blocked_silent=0,
+                           ma_no_evidence=0, ma_filled=0, ma_clamped_away=0)
 
     def _subdivision(event: List[NotationNote]) -> int:
         """Equal parts the beat this event sits on was read as.
@@ -917,6 +1005,7 @@ def build_music21_score(score: NotationScore, grid_chords: bool = True):
                             _fill = _clamp_to_beat_frame(onset, _fill)
                             if _fill > el.quarterLength:
                                 el.quarterLength = _fill
+                                LAST_FILL_STATS["drum_filled"] += 1
                         # ANECHOIC MA GATES EVERY OTHER REST ON THE PAGE. Basic
                         # Pitch's note ends are cut-offs, not releases, so the
                         # leftover of a beat became a rest nobody performs. Ma
@@ -933,14 +1022,35 @@ def build_music21_score(score: NotationScore, grid_chords: bool = True):
                             _void = max((n.trailing_void for n in event
                                          if n.trailing_void is not None),
                                         default=None)
+                            LAST_FILL_STATS["ma_seen"] += 1
+                            if _res is None:
+                                LAST_FILL_STATS["ma_no_evidence"] += 1
                             _reach = _ma_gate.limit(_res, _void, _MA_BASE_FILL_QL)
-                            if _reach > 0:
+                            if _reach <= 0:
+                                LAST_FILL_STATS["ma_blocked_silent"] += 1
+                            else:
+                                # NOT clamped to the beat frame. That helper
+                                # exists for tuplets, which are a statement
+                                # about how ONE beat is divided; a legato fill
+                                # is not, and clamping it there killed 607 of
+                                # 817 fills - every note starting late in a
+                                # beat could not reach the attack it was being
+                                # extended toward. split_for_hierarchy below
+                                # renders a beat- or bar-crossing duration as
+                                # the TIED chain the reader expects, which is
+                                # the rule ("use ties if a duration crosses
+                                # those boundaries") being satisfied properly
+                                # rather than avoided by refusing to extend.
+                                # The fill is still bounded by `gap`, so it can
+                                # never run into the next attack in its voice.
                                 _fill = _representable_at_most(
                                     min(gap, el.quarterLength + _reach),
                                     triplet, divisor=None)
-                                _fill = _clamp_to_beat_frame(onset, _fill)
                                 if _fill > el.quarterLength:
                                     el.quarterLength = _fill
+                                    LAST_FILL_STATS["ma_filled"] += 1
+                                else:
+                                    LAST_FILL_STATS["ma_clamped_away"] += 1
                     if el.quarterLength <= 0:
                         continue
 
@@ -983,6 +1093,9 @@ def build_music21_score(score: NotationScore, grid_chords: bool = True):
                         _chain_tie(piece, seg_i, len(chain))
                         m_voice.insert(float(seg_start), piece)
                         _voice_filled_to = float(seg_start) + float(seg_dur)
+                LAST_FILL_STATS["gaps_closed"] = (
+                    LAST_FILL_STATS.get("gaps_closed", 0)
+                    + _close_unwritable_gaps(m_voice))
                 m_voice.makeRests(fillGaps=True, inPlace=True)
                 m_part.insert(0.0, m_voice)
 
