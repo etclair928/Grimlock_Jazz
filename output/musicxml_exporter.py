@@ -214,6 +214,23 @@ def _clamp_to_beat_frame(onset, ql):
     return min(float(ql), frame_end - float(onset))
 
 
+# The finest unit a legato FILL may land on. A fill is not restricted to a
+# single notatable value the way an isolated duration is: split_for_hierarchy
+# renders whatever it is given as the tied chain the reader expects, so
+# limiting the fill to one note value throws reach away for nothing.
+# _representable_at_most rounded 47.4% of fill requests DOWN, a median of 0.333
+# quarters each - 1.25 to 1.0, 2.5 to 2.0, 1.75 to 1.5 - and every one of those
+# is an ordinary tie.
+_FILL_GRID_QL = 0.5
+
+
+def _fill_value_at_most(value: float, unit: float = _FILL_GRID_QL) -> float:
+    """Largest multiple of `unit` not exceeding `value`. Never lengthens."""
+    if value <= 0 or unit <= 0:
+        return 0.0
+    return max(0.0, (int((value + 1e-9) / unit)) * unit)
+
+
 def _close_unwritable_gaps(m_voice) -> int:
     """Close gaps too short to be written, by holding the previous note.
 
@@ -1025,7 +1042,8 @@ def build_music21_score(score: NotationScore, grid_chords: bool = True):
                             LAST_FILL_STATS["ma_seen"] += 1
                             if _res is None:
                                 LAST_FILL_STATS["ma_no_evidence"] += 1
-                            _reach = _ma_gate.limit(_res, _void, _MA_BASE_FILL_QL)
+                            _reach = _ma_gate.limit(_res, _void, _MA_BASE_FILL_QL,
+                                                    gap=gap)
                             if _reach <= 0:
                                 LAST_FILL_STATS["ma_blocked_silent"] += 1
                             else:
@@ -1043,9 +1061,10 @@ def build_music21_score(score: NotationScore, grid_chords: bool = True):
                                 # rather than avoided by refusing to extend.
                                 # The fill is still bounded by `gap`, so it can
                                 # never run into the next attack in its voice.
-                                _fill = _representable_at_most(
-                                    min(gap, el.quarterLength + _reach),
-                                    triplet, divisor=None)
+                                _want = min(gap, el.quarterLength + _reach)
+                                _fill = (_representable_at_most(_want, triplet, divisor=None)
+                                         if triplet else
+                                         _fill_value_at_most(_want))
                                 if _fill > el.quarterLength:
                                     el.quarterLength = _fill
                                     LAST_FILL_STATS["ma_filled"] += 1
