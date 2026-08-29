@@ -255,17 +255,59 @@ def resolve_meter(candidates: Sequence[Tuple[int, int, float]]) -> MeterResoluti
     for n, d, c in candidates:
         votes[(n, d)] = votes.get((n, d), 0.0) + c
 
+    # GROUPING IS DECIDED BY HOW MANY WITNESSES SAW IT, NOT BY THE LOUDEST ONE.
+    #
+    # Duple-or-triple is a different KIND of question from how many beats go in
+    # a bar. Writing 6/4 where 3/4 belongs is a barring choice and either can be
+    # read; writing 6/4 where 4/4 belongs makes every bar after it wrong.
+    #
+    # Summed confidence cannot tell those apart. On HRV two independent
+    # witnesses said 4/4 (0.333, 0.158) and one said 6/4 (0.877), so 0.877 beat
+    # 0.491 and the page has been in 6/4 since 2026-08-06. Measured against the
+    # kit and the bass - the two parts that carry meter - HRV's onsets accent a
+    # duple grouping (drums 1.23 at g=2, bass 1.27 at g=4) and not a triple one
+    # (1.02 at g=3). The majority was right and was outvoted by one number.
+    #
+    # So: settle the CATEGORY by counting witnesses, then pick the bar length
+    # within it by confidence as before. A tie in count falls back to
+    # confidence, which is the old behaviour and the right default when the
+    # witnesses genuinely split.
+    def _is_triple(numerator: int) -> bool:
+        return numerator % 3 == 0
+
+    triple_n = sum(1 for n, _d, _c in candidates if _is_triple(n))
+    duple_n = len(candidates) - triple_n
+    grouping_note = None
+    if triple_n and duple_n:                      # they disagree on the CATEGORY
+        if triple_n != duple_n:
+            want_triple = triple_n > duple_n
+            eligible = {k: v for k, v in votes.items()
+                        if _is_triple(k[0]) == want_triple}
+            if eligible:
+                grouping_note = {
+                    "duple_witnesses": duple_n,
+                    "triple_witnesses": triple_n,
+                    "chose": "triple" if want_triple else "duple",
+                    "why": ("grouping settled by witness count, not summed "
+                            "confidence - duple-or-triple is a category, and a "
+                            "majority of independent witnesses on it outranks "
+                            "one confident outlier"),
+                }
+                votes = eligible
+
     winner = max(votes, key=lambda k: votes[k])
     total_weight = sum(votes.values())
     winner_share = votes[winner] / total_weight if total_weight > 0 else 1.0
 
     contention = None
-    if len(votes) > 1:
+    if len(votes) > 1 or grouping_note is not None:
         contention = {
             "candidates": [{"numerator": n, "denominator": d, "confidence": c} for n, d, c in candidates],
             "resolved": {"numerator": winner[0], "denominator": winner[1]},
             "winner_share": winner_share,
         }
+        if grouping_note is not None:
+            contention["grouping"] = grouping_note
 
     confidence = float(np.clip(winner_share, 0.3, 0.95))
     return MeterResolution(winner[0], winner[1], confidence, contention)
