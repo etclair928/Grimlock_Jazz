@@ -141,3 +141,64 @@ def test_fill_value_of_nothing_is_nothing():
     from output.musicxml_exporter import _fill_value_at_most
     assert _fill_value_at_most(0.0) == 0.0
     assert _fill_value_at_most(-1.0) == 0.0
+
+
+# ---------------------------------------------------------------- voicing
+# _monophonic_share decides whether a part is a LINE. It is here rather than in
+# its own file because it is the other half of the same problem: both voicers
+# allocate by when a note ENDS, so sustaining a note harder (which ma_legato
+# now does) makes it overlap the next one and buys a second voice that then
+# rests through everything the first voice plays.
+
+def _ev(start, end, pitch=60):
+    from output.notation_score import NotationNote
+    return [NotationNote(pitch=pitch, start_ms=start, end_ms=end, velocity=80,
+                         source_note_id=f"n{start}")]
+
+
+def test_a_clean_line_measures_fully_monophonic():
+    from output.musicxml_exporter import _monophonic_share
+    evs = [_ev(0, 100), _ev(100, 200), _ev(200, 300)]
+    assert _monophonic_share(evs) == 1.0
+
+
+def test_full_overlap_measures_polyphonic():
+    from output.musicxml_exporter import _monophonic_share
+    evs = [_ev(0, 200), _ev(0, 200, 64)]
+    assert _monophonic_share(evs) < 0.55
+
+
+def test_slight_overlap_still_reads_as_a_line():
+    """A line whose notes ring a little into the next one is still a line -
+    that is exactly the sustain this pass now writes, and it must not cost a
+    second voice."""
+    from output.musicxml_exporter import (_monophonic_share,
+                                          MONOPHONIC_VOICE_SHARE)
+    evs = [_ev(0, 110), _ev(100, 210), _ev(200, 310)]
+    assert _monophonic_share(evs) >= MONOPHONIC_VOICE_SHARE
+
+
+def test_sparseness_is_not_polyphony():
+    """Long silences between notes must not make a part look polyphonic;
+    silence is a different question and is measured over sounding time."""
+    from output.musicxml_exporter import _monophonic_share
+    evs = [_ev(0, 100), _ev(5000, 5100), _ev(9000, 9100)]
+    assert _monophonic_share(evs) == 1.0
+
+
+def test_collapse_keeps_every_event():
+    """The collapse may re-voice, never discard - measured on both songs it
+    changed the rest count by a third and the attack count by zero."""
+    from output.musicxml_exporter import _collapse_to_one_voice
+    evs = [_ev(200, 300), _ev(0, 100), _ev(100, 200)]
+    out = _collapse_to_one_voice(evs)
+    assert len(out) == 1
+    assert len(out[0]) == 3
+    starts = [min(n.start_ms for n in ev) for ev in out[0]]
+    assert starts == sorted(starts)
+
+
+def test_single_event_is_monophonic():
+    from output.musicxml_exporter import _monophonic_share
+    assert _monophonic_share([_ev(0, 100)]) == 1.0
+    assert _monophonic_share([]) == 1.0

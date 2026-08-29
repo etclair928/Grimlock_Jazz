@@ -640,6 +640,52 @@ def _events_to_voices(events: List[List[NotationNote]]) -> List[List[List[Notati
     return voices
 
 
+# A part this monophonic is a LINE, and a line belongs in one voice.
+# Measured against Klangio on Educated Heart: they write one voice per part and
+# 22.2% rests, we wrote exactly two per part and 43.8%. Their bass is 280 notes
+# and 34 rests in a single voice; ours was split 138+165 with 44-51% rests in
+# each, on a line that is 73% monophonic. Each voice was resting while the
+# other played.
+MONOPHONIC_VOICE_SHARE = 0.70
+
+
+def _monophonic_share(events: List[List[NotationNote]]) -> float:
+    """Fraction of this part's SOUNDING time with at most one event active.
+
+    Measured over event spans rather than a sampled clock so a part made of
+    very short notes is not scored as monophonic merely by being sparse -
+    sparseness is silence, which is a different question from polyphony.
+    """
+    if len(events) < 2:
+        return 1.0
+    spans = sorted((min(n.start_ms for n in ev), max(n.end_ms for n in ev))
+                   for ev in events)
+    overlap = 0.0
+    total = 0.0
+    reach = spans[0][1]
+    for (s0, e0), (s1, e1) in zip(spans, spans[1:]):
+        total += max(0.0, e0 - s0)
+        if s1 < reach:
+            overlap += min(reach, e1) - s1
+        reach = max(reach, e1)
+    total += max(0.0, spans[-1][1] - spans[-1][0])
+    if total <= 0:
+        return 1.0
+    return max(0.0, 1.0 - overlap / total)
+
+
+def _collapse_to_one_voice(events: List[List[NotationNote]]
+                           ) -> List[List[List[NotationNote]]]:
+    """Every event in one voice, in time order.
+
+    The overlaps this creates are not left to collide: the writer already
+    clamps any note longer than the gap to the next onset, which for a line is
+    the correct reading anyway - a monophonic part's note ends when the next
+    one starts.
+    """
+    return [sorted(events, key=lambda ev: min(n.start_ms for n in ev))]
+
+
 def _voices_from_index(notes: List[NotationNote], grid=None) -> List[List[List[NotationNote]]]:
     """Honor an upstream voicer's explicit voice_index (e.g.
     piano_reduction's <=4 rhythmic-independence voicer): one voice per
@@ -869,10 +915,30 @@ def build_music21_score(score: NotationScore, grid_chords: bool = True):
                                  musical_time=score.musical_time)
             return _chord_events(ns)
 
-        if any(n.voice_index is not None for n in part.notes):
+        # ONE VOICE FOR A LINE, and this is decided BEFORE any stamped
+        # voice_index is honoured, because the over-splitting happens upstream.
+        # Both voicers allocate by when a note ENDS: assign_voices interval-
+        # partitions the events, _events_to_voices opens a voice whenever none
+        # is free. Sustaining a note - which we now do far more - makes it
+        # overlap the next one, so both hand back two voices for a line, and
+        # the second voice then rests through everything the first one plays.
+        # Measured on Educated Heart every pitched part came back stamped 1/2
+        # in near-equal halves: vocals 91.0% monophonic, bass 82.8%, drums
+        # 98.8%, all split in two.
+        #
+        # Deliberately overrides _voices_from_index, which otherwise renders
+        # the decision it was handed verbatim. The justification is the
+        # measurement, not a preference: a part that sounds one note at a time
+        # for nine tenths of its length is a line, whatever stamped it.
+        # Genuinely polyphonic parts are untouched - the harmonic stems measure
+        # 62-67% and keep the voicing they earned.
+        _evs = _group(part.notes)
+        if _monophonic_share(_evs) >= MONOPHONIC_VOICE_SHARE:
+            voices = _collapse_to_one_voice(_evs)
+        elif any(n.voice_index is not None for n in part.notes):
             voices = _voices_from_index(part.notes, grid=_group)
         else:
-            voices = _events_to_voices(_group(part.notes))
+            voices = _events_to_voices(_evs)
         staves = _staff_groups(voices)
         voice_tag = part.voice_id.split("::")[-1]
 
