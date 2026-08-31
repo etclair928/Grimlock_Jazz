@@ -41,6 +41,13 @@ from output.ma_legato import calibrate_from_notes
 # tempo: at T BPM one quarter note is 60000/T ms.
 _MIN_QUARTER_LENGTH = 0.125    # a 32nd note - the finest we let a duration round to
 
+# Ceiling on how finely a beat may be divided, or None for "whatever the beat
+# was read as". 2 = nothing finer than an eighth. Also suppresses tuplets when
+# set below 3, since a triplet is a finer division than the cap allows: on
+# Hubristic 6.5% of our onsets sit at triplet positions on a song our own
+# pipeline classified binary, where Basic Pitch has exactly zero.
+MAX_SUBDIVISION = None
+
 # MuseScore (and most engravers) represent at most four voices per staff.
 # More than this is not a prettiness question - it is invalid, and the
 # file will not open. Overflow voices spill to a new staff of the same
@@ -116,7 +123,24 @@ def _snap_quarter_length(ql: float, allow_triplet: bool, divisor=None,
     # A beat read as 2 parts snaps to halves of a beat; as 4, to quarters. The
     # fallback stays 4 so any caller that does not know the subdivision behaves
     # exactly as before.
+    # EVIDENCE CAP ON THE GRID. Set MAX_SUBDIVISION to refuse a grid finer
+    # than the material supports. Measured on Hubristic against Basic Pitch's
+    # own read of the same audio (same detector, so the difference is purely
+    # notation): it places 59.7% of onsets ON the beat and 15.7% at sixteenth
+    # positions; we place 42.3% and 29.9%. Its sixteenth grid also scores at or
+    # below chance on this song, as Educated Heart's did at 0.77x. Writing a
+    # subdivision the performance does not support turns timing spread into
+    # noteheads.
     grid = max(1, int(subdivision or 4))
+    if MAX_SUBDIVISION:
+        grid = min(grid, int(MAX_SUBDIVISION))
+        # A tuplet is a FINER division than the cap permits, so the cap has to
+        # reach it too or the divisor path below simply routes around the
+        # ceiling. Capping the grid alone left 6.6% of onsets on triplet
+        # positions - more than before the cap, not fewer.
+        if int(MAX_SUBDIVISION) < 3:
+            divisor = None
+            allow_triplet = False
     binary = round(ql * grid) / float(grid)
     if divisor:
         # This beat was READ as a `divisor`-part tuplet, so its own grid is the

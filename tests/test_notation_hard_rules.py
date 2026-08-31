@@ -74,3 +74,50 @@ def test_an_unwritable_tuplet_frame_yields_no_rest_at_all():
     goes unanchored rather than being anchored with something unreadable."""
     from fractions import Fraction
     assert _leading_tuplet_rest(Fraction(1, 12), 3) is None
+
+
+# ---------------------------------------------------------------- grid cap
+# MAX_SUBDIVISION refuses a grid finer than the material supports. Measured on
+# Hubristic against Basic Pitch's own read of the same audio - same detector,
+# so every difference is our notation layer - capping at an eighth took
+# on-beat placement from 46.9% to 73.0% (Basic Pitch: 59.7%), sixteenth
+# positions from 26.2% to 0.0%, rests from 29.3% to 20.4% (Basic Pitch: 20.3%)
+# and illegal tuplets from 5 to 0, while ATTACKS were preserved (1891 -> 1894)
+# and voice quality was untouched (mean leap 8.08 -> 8.02).
+
+def test_cap_is_off_by_default():
+    """It changes how every duration is written, so it must be asked for."""
+    import output.musicxml_exporter as mx
+    assert mx.MAX_SUBDIVISION is None
+
+
+def test_cap_limits_the_binary_grid():
+    import output.musicxml_exporter as mx
+    before = mx.MAX_SUBDIVISION
+    try:
+        mx.MAX_SUBDIVISION = 2
+        # Under an eighth cap every value must land on a multiple of 0.5.
+        # 0.75 is a sixteenth-grid value and sits exactly between two eighth
+        # points, so it rounds to 1.0 - the assertion is that it leaves the
+        # sixteenth grid, not that it rounds any particular way.
+        for want in (0.3, 0.75, 1.25, 1.75):
+            got = mx._snap_quarter_length(want, False, None, 4)
+            assert abs(got * 2 - round(got * 2)) < 1e-9, (want, got)
+        mx.MAX_SUBDIVISION = None
+        assert mx._snap_quarter_length(0.75, False, None, 4) == 0.75
+    finally:
+        mx.MAX_SUBDIVISION = before
+
+
+def test_cap_below_three_also_suppresses_tuplets():
+    """A triplet is a finer division than an eighth cap allows. Capping the
+    binary grid alone let the divisor path route around the ceiling and LEFT
+    MORE onsets on triplet positions than before the cap."""
+    import output.musicxml_exporter as mx
+    before = mx.MAX_SUBDIVISION
+    try:
+        mx.MAX_SUBDIVISION = 2
+        capped = mx._snap_quarter_length(1.0 / 3.0, True, 3, 2)
+        assert abs(capped * 2 - round(capped * 2)) < 1e-9, "must land on the eighth grid"
+    finally:
+        mx.MAX_SUBDIVISION = before
