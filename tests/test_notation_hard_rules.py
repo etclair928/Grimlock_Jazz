@@ -85,10 +85,12 @@ def test_an_unwritable_tuplet_frame_yields_no_rest_at_all():
 # and illegal tuplets from 5 to 0, while ATTACKS were preserved (1891 -> 1894)
 # and voice quality was untouched (mean leap 8.08 -> 8.02).
 
-def test_cap_is_off_by_default():
-    """It changes how every duration is written, so it must be asked for."""
+def test_polish_is_on_by_default():
+    """Measured across six songs it cut rests by a third to a half and raised
+    on-beat placement 9-23 points while attacks stayed put, so it ships on."""
     import output.musicxml_exporter as mx
-    assert mx.MAX_SUBDIVISION is None
+    assert mx.MAX_SUBDIVISION == 2
+    assert mx.POLISH_SUBDIVISION_CAP == 2
 
 
 def test_cap_limits_the_binary_grid():
@@ -103,7 +105,7 @@ def test_cap_limits_the_binary_grid():
         for want in (0.3, 0.75, 1.25, 1.75):
             got = mx._snap_quarter_length(want, False, None, 4)
             assert abs(got * 2 - round(got * 2)) < 1e-9, (want, got)
-        mx.MAX_SUBDIVISION = None
+        mx.MAX_SUBDIVISION = None      # unpolished
         assert mx._snap_quarter_length(0.75, False, None, 4) == 0.75
     finally:
         mx.MAX_SUBDIVISION = before

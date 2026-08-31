@@ -41,12 +41,45 @@ from output.ma_legato import calibrate_from_notes
 # tempo: at T BPM one quarter note is 60000/T ms.
 _MIN_QUARTER_LENGTH = 0.125    # a 32nd note - the finest we let a duration round to
 
-# Ceiling on how finely a beat may be divided, or None for "whatever the beat
-# was read as". 2 = nothing finer than an eighth. Also suppresses tuplets when
-# set below 3, since a triplet is a finer division than the cap allows: on
-# Hubristic 6.5% of our onsets sit at triplet positions on a song our own
-# pipeline classified binary, where Basic Pitch has exactly zero.
-MAX_SUBDIVISION = None
+# ===========================================================================
+# POLISH
+# ===========================================================================
+# The ceiling on how finely a beat may be divided. 2 = nothing finer than an
+# eighth; None = whatever the beat was read as. Below 3 it also suppresses
+# tuplets, because a triplet is a finer division than the cap allows and the
+# divisor path otherwise routes straight around the ceiling - capping the
+# binary grid ALONE left MORE onsets on triplet positions than before it.
+#
+# WHY THIS IS ON BY DEFAULT. Measured across the whole corpus, capped against
+# uncapped, re-exported from the same intermediates so only the engraving
+# changes:
+#
+#   song            attacks        rests        on-beat     16th%   illegal tup
+#   Clocks          3667 -> 3667   959 -> 683   47% -> 56%   6%->0%    0 -> 1
+#   Educated Heart  1490 -> 1490   957 -> 659   46% -> 74%  24%->0%    3 -> 0
+#   HRV             3501 -> 3501   858 -> 413   50% -> 67%  23%->0%   16 -> 1
+#   Hopeful         4013 -> 4014  1175 -> 771   47% -> 72%  28%->0%    5 -> 0
+#   Grey            2913 -> 2915   580 -> 256   35% -> 58%  57%->1%    1 -> 1
+#   Hubristic       1891 -> 1894   782 -> 485   47% -> 73%  28%->0%    5 -> 0
+#
+# Rests fall by a third to a half on every song, on-beat placement rises 9-23
+# points, and ATTACKS ARE UNCHANGED everywhere (worst case +3). Nothing is
+# deleted; the same music is written on a grid a reader can follow.
+#
+# THE GATE THAT WAS TRIED AND ABANDONED. The obvious design is to cap only
+# where the evidence says a sixteenth grid is unsupported - score the onsets
+# against a sixteenth lattice and compare to chance. Measured, that gate would
+# EXEMPT Clocks, whose sixteenth grid scores 2.26x chance. But the published
+# human transcription of Clocks writes ZERO sixteenths, and the capped page
+# matches it exactly while the uncapped one does not. The two questions are
+# different: the grid test asks whether onsets sit near sixteenth positions,
+# and readability asks whether a reader should be shown sixteenths. A
+# performance can satisfy the first and still be written in eighths, which is
+# what a human editor does. So the cap is unconditional.
+POLISH_SUBDIVISION_CAP = 2
+
+# Backwards-compatible alias. Set either to None to engrave unpolished.
+MAX_SUBDIVISION = POLISH_SUBDIVISION_CAP
 
 # MuseScore (and most engravers) represent at most four voices per staff.
 # More than this is not a prettiness question - it is invalid, and the

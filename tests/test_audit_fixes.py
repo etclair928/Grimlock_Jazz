@@ -237,11 +237,37 @@ def test_allow_triplet_widens_the_vocabulary_it_does_not_replace_it():
     """`allow_triplet` used to return round(ql*3)/3 unconditionally, so a plain
     eighth inside a tuplet-flagged beat became a triplet eighth - which is how
     binary and ternary positions ended up in one measure."""
+    import output.musicxml_exporter as mx
     from output.musicxml_exporter import _snap_quarter_length
-    assert _snap_quarter_length(0.5, True) == 0.5
-    assert _snap_quarter_length(1.0, True) == 1.0
-    assert abs(_snap_quarter_length(0.34, True) - 1.0 / 3.0) < 1e-6
-    assert _snap_quarter_length(0.5, False) == 0.5
+    # Tested UNPOLISHED. This pins the primitive - that allow_triplet widens
+    # the vocabulary instead of replacing it - which is a different question
+    # from Polish's policy of refusing anything finer than an eighth. Polish
+    # sits on top and is asserted separately below.
+    before = mx.MAX_SUBDIVISION
+    try:
+        mx.MAX_SUBDIVISION = None
+        assert _snap_quarter_length(0.5, True) == 0.5
+        assert _snap_quarter_length(1.0, True) == 1.0
+        assert abs(_snap_quarter_length(0.34, True) - 1.0 / 3.0) < 1e-6
+        assert _snap_quarter_length(0.5, False) == 0.5
+    finally:
+        mx.MAX_SUBDIVISION = before
+
+
+def test_polish_suppresses_the_triplet_the_primitive_would_allow():
+    """The other half of the pair above: with Polish on, the same ternary
+    value must NOT come back as a triplet, because the divisor path would
+    otherwise route straight around the eighth ceiling."""
+    import output.musicxml_exporter as mx
+    from output.musicxml_exporter import _snap_quarter_length
+    before = mx.MAX_SUBDIVISION
+    try:
+        mx.MAX_SUBDIVISION = 2
+        got = _snap_quarter_length(0.34, True)
+        assert abs(got - 1.0 / 3.0) > 1e-6, "a triplet survived the cap"
+        assert abs(got * 2 - round(got * 2)) < 1e-9, "must land on the eighth grid"
+    finally:
+        mx.MAX_SUBDIVISION = before
 
 
 def test_the_gap_clamp_produces_a_notatable_duration():
