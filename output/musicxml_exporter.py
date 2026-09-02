@@ -81,6 +81,37 @@ POLISH_SUBDIVISION_CAP = 2
 # Backwards-compatible alias. Set either to None to engrave unpolished.
 MAX_SUBDIVISION = POLISH_SUBDIVISION_CAP
 
+
+def polish_cap_for(score) -> "int | None":
+    """The cap this particular score should be engraved under.
+
+    POLISH IS FOR MATERIAL WITH A KIT, AND IT IS WRONG WITHOUT ONE. Measured
+    on the Chopin Nocturne, an eighth-note ceiling took the page from 34.5%
+    sixteenths to 0.5% - that is not timing spread being tidied away, it is
+    real passagework being rewritten as eighths. On Clocks the same pass moved
+    6.1% to 0.3% and landed exactly on a human transcription that writes no
+    sixteenths at all. The difference is the repertoire, not the numbers.
+
+    The available signal is percussion. Across the whole corpus every
+    solo-path piano score is piano-only with no drum part, and every band
+    score carries one; a kit is also what makes eighth-note quantisation right
+    in the first place, since it supplies the pulse the rest of the band plays
+    against. So a score with no percussion keeps its own subdivision.
+
+    A proxy, and named as one: a drummerless acoustic band would also be
+    exempted. That failure is conservative - it leaves the old behaviour in
+    place rather than flattening something real.
+    """
+    if MAX_SUBDIVISION is None:
+        return None
+    try:
+        parts = list(getattr(score, "parts", ()) or ())
+        if parts and not any(getattr(p, "is_drum", False) for p in parts):
+            return None
+    except Exception:
+        pass
+    return MAX_SUBDIVISION
+
 # MuseScore (and most engravers) represent at most four voices per staff.
 # More than this is not a prettiness question - it is invalid, and the
 # file will not open. Overflow voices spill to a new staff of the same
@@ -817,6 +848,21 @@ def build_music21_score(score: NotationScore, grid_chords: bool = True):
     from music21 import stream, note as m21note, chord as m21chord, tempo as m21tempo
     from music21 import meter as m21meter, key as m21key, instrument as m21instrument
     from music21 import tie as m21tie
+
+    # Polish is decided ONCE, per score, from what the score contains.
+    global MAX_SUBDIVISION
+    _polish_outer = MAX_SUBDIVISION
+    MAX_SUBDIVISION = polish_cap_for(score)
+    try:
+        return _build_music21_score_inner(
+            score, grid_chords, stream, m21note, m21chord, m21tempo,
+            m21meter, m21key, m21instrument, m21tie)
+    finally:
+        MAX_SUBDIVISION = _polish_outer
+
+
+def _build_music21_score_inner(score, grid_chords, stream, m21note, m21chord,
+                               m21tempo, m21meter, m21key, m21instrument, m21tie):
 
 
     # WHERE BAR 1 STARTS, AND WHERE THE PICKUP GOES.

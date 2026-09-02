@@ -123,3 +123,45 @@ def test_cap_below_three_also_suppresses_tuplets():
         assert abs(capped * 2 - round(capped * 2)) < 1e-9, "must land on the eighth grid"
     finally:
         mx.MAX_SUBDIVISION = before
+
+
+# ------------------------------------------------------- polish is gated
+# Polish is right for material with a kit and WRONG without one. On the Chopin
+# Nocturne an eighth ceiling took the page from 34.5% sixteenths to 0.5% - real
+# passagework rewritten as eighths - while on Clocks it took 6.1% to 0.3% and
+# landed on a human transcription that writes none at all.
+
+class _FakePart:
+    def __init__(self, is_drum): self.is_drum = is_drum
+
+
+class _FakeScore:
+    def __init__(self, *drums): self.parts = [_FakePart(d) for d in drums]
+
+
+def test_polish_runs_when_the_score_has_a_kit():
+    import output.musicxml_exporter as mx
+    assert mx.polish_cap_for(_FakeScore(False, False, True)) == mx.MAX_SUBDIVISION
+
+
+def test_polish_stands_down_without_percussion():
+    """Solo piano keeps its own subdivision - its sixteenths are the music."""
+    import output.musicxml_exporter as mx
+    assert mx.polish_cap_for(_FakeScore(False, False)) is None
+
+
+def test_the_global_switch_still_wins():
+    """Turning Polish off entirely must not be overridden by the gate."""
+    import output.musicxml_exporter as mx
+    before = mx.MAX_SUBDIVISION
+    try:
+        mx.MAX_SUBDIVISION = None
+        assert mx.polish_cap_for(_FakeScore(True)) is None
+    finally:
+        mx.MAX_SUBDIVISION = before
+
+
+def test_an_empty_score_does_not_crash_the_gate():
+    import output.musicxml_exporter as mx
+    assert mx.polish_cap_for(_FakeScore()) == mx.MAX_SUBDIVISION
+    assert mx.polish_cap_for(object()) == mx.MAX_SUBDIVISION
