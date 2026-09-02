@@ -165,3 +165,47 @@ def test_an_empty_score_does_not_crash_the_gate():
     import output.musicxml_exporter as mx
     assert mx.polish_cap_for(_FakeScore()) == mx.MAX_SUBDIVISION
     assert mx.polish_cap_for(object()) == mx.MAX_SUBDIVISION
+
+
+# ------------------------------------------------- the writer cannot be broken
+# A page that will not OPEN is worse than any notation choice inside it. The
+# Chopin intermediate carried a note music21 read as 18-in-the-time-of-13 with
+# quarterLength 13/36, ending 5/36 short of the next onset - a gap nothing can
+# write - so the MusicXML writer emitted a "2048th" and raised
+# MusicXMLExportException, refusing the ENTIRE FILE. Polish had been masking it
+# by snapping everything onto the eighth grid; standing Polish down for solo
+# piano re-exposed it on exactly the repertoire that needs it.
+
+def test_an_illegal_tuplet_is_not_writable():
+    from music21 import note as m21note, duration as m21duration
+    from output.musicxml_exporter import _writable_frame_marker
+    n = m21note.Note()
+    n.duration = m21duration.Duration(0.5)
+    n.duration.appendTuplet(m21duration.Tuplet(18, 13))
+    assert not _writable_frame_marker(n)
+
+
+def test_the_safety_net_repairs_what_makenotation_invents():
+    """It runs AFTER makeNotation because that is the pass that invents these -
+    the same one that turned an unfilled triplet slot into a 32nd rest."""
+    from music21 import stream, note as m21note, duration as m21duration
+    from output.musicxml_exporter import _make_part_writable, _writable_frame_marker
+    p = stream.Part()
+    good = m21note.Note(); good.quarterLength = 0.5
+    bad = m21note.Note()
+    bad.duration = m21duration.Duration(13.0 / 36.0)
+    bad.duration.appendTuplet(m21duration.Tuplet(18, 13))
+    p.append(good); p.append(bad)
+    fixed = _make_part_writable(p)
+    assert fixed >= 1
+    for el in p.recurse().notesAndRests:
+        assert _writable_frame_marker(el), (el.duration.type, el.duration.tuplets)
+
+
+def test_the_safety_net_leaves_a_clean_part_alone():
+    from music21 import stream, note as m21note
+    from output.musicxml_exporter import _make_part_writable
+    p = stream.Part()
+    for ql in (1.0, 0.5, 0.25, 2.0):
+        n = m21note.Note(); n.quarterLength = ql; p.append(n)
+    assert _make_part_writable(p) == 0

@@ -341,6 +341,34 @@ def _close_unwritable_gaps(m_voice) -> int:
     value, since replacing an unwritable rest with an unwritable note would
     only move the defect.
     """
+    # AN ILLEGAL TUPLET IS STRIPPED BEFORE ANYTHING ELSE IS DECIDED.
+    # The Chopin intermediate carries notes music21 reads as 18-in-the-time-of-13
+    # and 9-in-the-time-of-8. Those are barred outright, and they are also
+    # actively destructive: the 18:13 note had quarterLength 13/36 and ended
+    # 5/36 short of the next onset, a gap nothing can write, so the MusicXML
+    # writer invented a 2048th and REFUSED THE WHOLE FILE. Polish had been
+    # hiding this by snapping everything onto the eighth grid; standing Polish
+    # down for solo piano re-exposed it on exactly the repertoire that needs it.
+    #
+    # Stripped rather than resized: the tuplet is the thing that is wrong, and
+    # once it is gone the ordinary gap-closing below can reach the next onset.
+    stripped = 0
+    for el in list(m_voice.notesAndRests):
+        if _writable_frame_marker(el):
+            continue
+        try:
+            el.duration.tuplets = ()
+            fixed = _representable_at_most(float(el.quarterLength), False, divisor=None)
+            if fixed <= 0:
+                fixed = _MIN_WRITTEN_VALUE
+            el.quarterLength = fixed
+            stripped += 1
+        except Exception:
+            pass
+    if stripped:
+        LAST_FILL_STATS["illegal_tuplets_stripped"] = (
+            LAST_FILL_STATS.get("illegal_tuplets_stripped", 0) + stripped)
+
     closed = 0
     items = sorted(m_voice.notesAndRests, key=lambda e: (float(e.offset),
                                                          float(e.quarterLength)))
@@ -841,6 +869,36 @@ def _normalize_voice_numbers(path: str) -> None:
                 fh.write(rewritten)
 
 
+def _make_part_writable(m_part) -> int:
+    """Last line of defence, run AFTER makeNotation and before the writer.
+
+    Everything upstream can be correct and this can still be needed, because
+    makeNotation INVENTS elements: it is the same pass that turned an unfilled
+    triplet slot into a 32nd rest and a leftover into a 12:7. On the Chopin
+    intermediate it leaves a note music21 reads as 18-in-the-time-of-13 with
+    quarterLength 13/36, which ends 5/36 short of the next onset - a gap
+    nothing can write, so the writer emits a "2048th" and REFUSES THE ENTIRE
+    FILE with MusicXMLExportException.
+
+    A page that will not open is worse than any notation choice inside it, so
+    this trades exactness for a file that exists: an illegal tuplet is dropped
+    and an unwritable duration is rounded down to one the vocabulary has. It
+    reports what it touched rather than doing it silently.
+    """
+    fixed = 0
+    for el in list(m_part.recurse().notesAndRests):
+        try:
+            if _writable_frame_marker(el):
+                continue
+            el.duration.tuplets = ()
+            want = _representable_at_most(float(el.quarterLength), False, divisor=None)
+            el.quarterLength = want if want > 0 else _MIN_WRITTEN_VALUE
+            fixed += 1
+        except Exception:
+            pass
+    return fixed
+
+
 def build_music21_score(score: NotationScore, grid_chords: bool = True):
     """Returns a music21.stream.Score. Each NotationPart becomes one or
     more staves; each staff carries at most MAX_VOICES_PER_STAFF voices,
@@ -1288,6 +1346,10 @@ def _build_music21_score_inner(score, grid_chords, stream, m21note, m21chord,
                 m_part.insert(0.0, m_voice)
 
             m_part = m_part.makeNotation(inPlace=False)
+            _fixed = _make_part_writable(m_part)
+            if _fixed:
+                LAST_FILL_STATS["unwritable_repaired"] = (
+                    LAST_FILL_STATS.get("unwritable_repaired", 0) + _fixed)
             m_score.insert(0.0, m_part)
 
     return m_score
