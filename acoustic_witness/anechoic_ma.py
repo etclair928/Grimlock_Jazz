@@ -1,47 +1,46 @@
 # =================================================================
 # MODULE: acoustic_witness/anechoic_ma.py
-# Ports the core of Symphony's AnechoicMa (agents/analysis/
-# anechoic_ma.py) - a frame-level "what's really happening
-# acoustically right now" witness. It produces a continuous timeline
-# of evidence about whether a moment is genuinely silent (rhythmic
-# void), a ringing/decaying tail (resonance - cymbal wash, pedal tone,
-# reverb), or real new musical activity - queryable over any time
-# window. Like every other pass in this codebase, it is a WITNESS,
-# not a judge: it never mutates a Note, it only produces evidence a
-# caller (the Conductor) writes as an Annotation.
+# Ports the core of Symphony's AnechoicMa - a frame-level "what's
+# really happening acoustically right now" witness. It produces a
+# continuous timeline of evidence about whether a moment is
+# genuinely silent, a ringing/decaying tail (resonance), or real new
+# musical activity - queryable over any time window. Like every
+# other pass in this codebase, it is a WITNESS, not a judge: it never
+# mutates a Note, it only produces evidence a caller (the Conductor)
+# writes as an Annotation.
 #
-# Directly motivated by tonight's "other"/vocals-stem investigation:
-# warm_sustained's absurd density (9.77 notes/sec, 246% cross-pitch
-# overlap on a 60s Hopeful.mp3 clip) is plausibly inflated by
-# resonance tails Basic Pitch misread as new note onsets rather than
-# the continuation of a real note - resonance_probability is built to
-# catch exactly that, as an acoustic-grounded complement to the purely
-# symbolic evidence (duration, confidence, centroid) used so far.
+# REWRITE NOTES (v2) - why the probability block changed:
+#   The original three probabilities were all functions of loudness,
+#   so they could not disagree (void vs active correlated -0.93).
+#   Fixes:
+#     1. No per-stem min-max. Level = dB above a 2 s local floor
+#        divided by a FIXED 18 dB range, forced to 0 below -60 dBFS.
+#     2. harmonic_persistence = 1 - spectral_flatness (was mean |STFT|,
+#        which is just loudness).
+#     3. Resonance REQUIRES a fall (negative dB slope), no onset, and
+#        energy still above the floor. A held note is not a tail.
+#     4. silent / resonant / active are a PARTITION (sum to 1).
+#     5. confidence = margin between the top two scores.
+#     6. Analysis window 4096 -> 2048 samples (hop unchanged).
+#     7. cymbal / pedal are band FRACTIONS, not _safe_norm products.
+#     8. Stem weight tables removed (the partition does not use
+#        them). Deliberately NOT retuned - see the bug report.
+#   Also fixed: get_resonant_regions() used to filter the silent
+#   regions list; merged regions kept a stale state.
 #
-# Cut from the original, and why (same "don't build ahead of need" /
-# "no redundant subsystems" discipline as every other port this
-# session):
-#   - Swing-aware subdivision alignment (SubdivisionAlignment,
-#     _subdivision_maps): Jazz's own Rhythm Engine (PulseField,
-#     lattice_witness, meter.py's phase-locked grid) already owns
-#     rhythmic-placement judgment, far more rigorously. A second,
-#     cruder subdivision-alignment system here would be exactly the
-#     redundant-subsystem trap this project exists to avoid.
-#   - Reverb-profile detection (AnechoicProfile: STUDIO/LIVE_ROOM/
-#     CHURCH/OUTDOOR): no downstream consumer needs this metadata.
-#   - Agent-framework plumbing (StageResult, StatusReporterProtocol,
-#     MemoryManagedProtocol, run()/validate()/get_confidence()): Jazz
-#     has no agent-runner architecture; every port this session is a
-#     plain function, not an agent class.
+# STATUS: thresholds below are starting values, not yet validated on
+# real vibraphone material. Do not treat active_material_probability
+# < 0.15 as hard evidence in note_support until re-measured.
 # =================================================================
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 import librosa
+from scipy.ndimage import maximum_filter1d
 from scipy.signal import butter, sosfilt
 
 from audio_engine import AudioEngine, AudioTrack
@@ -49,33 +48,46 @@ from core import StemType
 
 ACOUSTIC_ACTIVITY_ANNOTATION_KIND = "acoustic_activity"
 
+# Flip to True only after validating on a real take you did not build.
+# note_support can read this before trusting active_material_probability.
+ANECHOIC_VALIDATED = False
+
 ANECHOIC_SAMPLE_RATE = 22050
 ANECHOIC_HOP_LENGTH = 512
-ANECHOIC_FFT_SIZE = 4096
+ANECHOIC_FFT_SIZE = 2048            # was 4096 (186 ms); now ~93 ms
 ANECHOIC_ADAPTIVE_WINDOW_SEC = 2.0
 ANECHOIC_REGION_MERGE_GAP_SEC = 0.10
+
+# --- Level (replaces min-max) ---------------------------------------
+ANECHOIC_LEVEL_RANGE_DB = 18.0      # fixed dB range mapped to level 0..1
+ANECHOIC_LEVEL_FLOOR_PCT = 15       # local floor percentile
+ANECHOIC_ABS_GATE_DBFS = -60.0      # below this, level is forced to 0
+ANECHOIC_REF_PCT = 95               # robust "loud" reference for floor cap
+ANECHOIC_PRESENT_LEVEL = 0.25       # level at which energy counts as present
+
+# --- Fall (resonance needs a falling envelope) -----------------------
+ANECHOIC_SLOPE_SMOOTH_FRAMES = 5
+ANECHOIC_FALL_DEADZONE_DB = 0.04    # dB/frame below which = steady
+ANECHOIC_FALL_FULL_DB = 0.30        # dB/frame at which fall = 1
+
+# --- Onsets ----------------------------------------------------------
+ANECHOIC_ONSET_REF_MIN = 1.0        # floor on the onset scale (silent stems)
+ANECHOIC_ONSET_REF_PCT = 95
+
+# --- Region labelling ------------------------------------------------
+ANECHOIC_REGION_MIN_MARGIN = 0.10   # top class must beat 2nd by this
+ANECHOIC_SILENT_REGION_THRESHOLD = 0.50
+ANECHOIC_RESONANT_REGION_THRESHOLD = 0.50
 
 EPS = 1e-8
 
 
 # =====================================================================
-# Vectorized utility functions (unchanged from the original - already
-# correct, self-contained numpy)
+# Utility functions
 # =====================================================================
 
-def _safe_norm(x: np.ndarray) -> np.ndarray:
-    """Normalize to [0,1]. Handles NaN and constant arrays."""
-    x = np.nan_to_num(np.asarray(x, dtype=float), nan=0.0)
-    lo, hi = np.nanmin(x), np.nanmax(x)
-    if (hi - lo) < EPS:
-        return np.zeros_like(x)
-    return (x - lo) / (hi - lo)
-
-
 def _rolling_percentile(x: np.ndarray, win: int, pct: float) -> np.ndarray:
-    """Rolling percentile via vectorized numpy broadcasting - ~40x
-    faster than a Python loop (verified against real, minute-plus-long
-    stems in Symphony where the loop version was a real bottleneck)."""
+    """Rolling percentile via vectorized numpy broadcasting."""
     n = len(x)
     half = win // 2
     padded = np.pad(x, (half, half), mode="edge")
@@ -84,75 +96,31 @@ def _rolling_percentile(x: np.ndarray, win: int, pct: float) -> np.ndarray:
     return np.percentile(windows, pct, axis=1)
 
 
-def _moving_average(x: np.ndarray, win: int) -> np.ndarray:
-    if win <= 1:
-        return x.copy()
-    return np.convolve(x, np.ones(win) / win, mode="same")
+def _smooth(x: np.ndarray, win: int) -> np.ndarray:
+    """Moving average with edge padding (no zero-padding droop at the
+    ends, unlike np.convolve(..., mode='same'))."""
+    if win <= 1 or len(x) == 0:
+        return np.asarray(x, dtype=float).copy()
+    pad_l = win // 2
+    pad_r = win - 1 - pad_l
+    padded = np.pad(x, (pad_l, pad_r), mode="edge")
+    return np.convolve(padded, np.ones(win) / win, mode="valid")
 
 
 def _band_rms(y: np.ndarray, sr: int, n_frames: int, cutoff_hz: float, highpass: bool) -> np.ndarray:
-    """RMS energy in one frequency band (high-pass for cymbals/
-    transients, low-pass for bass/pedal tones)."""
+    """RMS energy in one frequency band, same framing as the main RMS."""
     try:
         nyq = sr / 2.0
         sos = butter(4, cutoff_hz / nyq, btype="high" if highpass else "low", output="sos")
         filtered = sosfilt(sos, y)
-        rms = librosa.feature.rms(y=filtered, hop_length=ANECHOIC_HOP_LENGTH)[0]
+        rms = librosa.feature.rms(
+            y=filtered, frame_length=ANECHOIC_FFT_SIZE, hop_length=ANECHOIC_HOP_LENGTH
+        )[0]
     except Exception:
         rms = np.zeros(n_frames)
     if len(rms) >= n_frames:
         return rms[:n_frames]
     return np.pad(rms, (0, n_frames - len(rms)), mode="edge")
-
-
-# =====================================================================
-# Stem-adaptive weights - unchanged from the original's calibration,
-# extended with Jazz's additional StemType members (VOCALS/GUITAR/
-# PIANO fall back to the same defaults FULL_MIX uses, since the
-# original never distinguished them either - htdemucs_6s wasn't
-# splitting those stems out yet when this was tuned).
-# =====================================================================
-
-def _margin_multiplier(stem: StemType) -> float:
-    return {
-        StemType.DRUMS: 0.7,
-        StemType.BASS: 0.6,
-        StemType.OTHER: 0.8,
-        StemType.FULL_MIX: 1.0,
-    }.get(stem, 1.0)
-
-
-def _composite_weights(stem: StemType) -> Dict[str, float]:
-    defaults = {
-        "void_energy": 0.30, "void_stasis": 0.20, "void_transient": 0.20,
-        "void_decay": 0.15, "void_noise": 0.15,
-        "res_harmonic": 0.35, "res_stasis": 0.20, "res_cymbal": 0.20,
-        "res_pedal": 0.15, "res_decay": 0.10,
-        "active_flux": 0.45, "active_energy": 0.25,
-        "active_stasis": 0.20, "active_harmonic": 0.10,
-    }
-    overrides = {
-        StemType.DRUMS: {"void_transient": 0.30, "res_cymbal": 0.35, "active_flux": 0.55},
-        StemType.BASS: {"void_energy": 0.35, "res_pedal": 0.40, "active_harmonic": 0.25},
-        StemType.OTHER: {"res_harmonic": 0.45, "void_decay": 0.20, "active_harmonic": 0.20},
-    }
-    w = {**defaults, **overrides.get(stem, {})}
-    for group in ("void", "res", "active"):
-        keys = [k for k in w if k.startswith(group)]
-        total = sum(w[k] for k in keys)
-        if total > 0:
-            for k in keys:
-                w[k] /= total
-    return w
-
-
-def _region_threshold(stem: StemType) -> float:
-    return {
-        StemType.DRUMS: 0.55,
-        StemType.BASS: 0.60,
-        StemType.OTHER: 0.58,
-        StemType.FULL_MIX: 0.65,
-    }.get(stem, 0.62)
 
 
 # =====================================================================
@@ -170,7 +138,10 @@ class RegionType:
 class SilenceState:
     """Immutable evidence for one time window - never a verdict on its
     own; a caller (the Conductor) decides what, if anything, to do
-    with it (e.g. write it as an acoustic_activity Annotation)."""
+    with it (e.g. write it as an acoustic_activity Annotation).
+
+    rhythmic_void_probability + resonance_probability +
+    active_material_probability sum to ~1 (a partition)."""
     start_ms: float
     end_ms: float
     energy_floor: float
@@ -188,12 +159,19 @@ class SilenceState:
     region_type: str = RegionType.UNCERTAIN
 
     def __post_init__(self) -> None:
-        if self.rhythmic_void_probability > 0.65:
-            object.__setattr__(self, "region_type", RegionType.SILENT)
-        elif self.resonance_probability > 0.6:
-            object.__setattr__(self, "region_type", RegionType.RESONANT)
-        elif self.active_material_probability > 0.7:
-            object.__setattr__(self, "region_type", RegionType.ACTIVE)
+        # Top class of the partition, only if it clearly beats the
+        # runner-up. Otherwise the window stays UNCERTAIN.
+        scored = sorted(
+            [
+                (self.rhythmic_void_probability, RegionType.SILENT),
+                (self.resonance_probability, RegionType.RESONANT),
+                (self.active_material_probability, RegionType.ACTIVE),
+            ],
+            reverse=True,
+        )
+        top, runner_up = scored[0], scored[1]
+        if top[0] > 0.0 and (top[0] - runner_up[0]) >= ANECHOIC_REGION_MIN_MARGIN:
+            object.__setattr__(self, "region_type", top[1])
 
     def get_confidence_penalty(self) -> float:
         """Recommended confidence penalty for a note falling in this
@@ -214,6 +192,22 @@ class SilenceRegion:
     state: SilenceState
 
 
+_STATE_FIELDS = (
+    "energy_floor", "spectral_stasis", "harmonic_persistence",
+    "noise_floor_probability", "decay_completion", "transient_absence",
+    "rhythmic_void_probability", "resonance_probability",
+    "active_material_probability", "cymbal_wash_probability",
+    "pedal_tone_probability", "confidence",
+)
+
+
+def _state_from_map(fmap: Dict[str, np.ndarray], idx: np.ndarray,
+                    start_ms: float, end_ms: float) -> SilenceState:
+    """Average every feature map over `idx` into one SilenceState."""
+    values = {name: float(np.mean(fmap[name][idx])) for name in _STATE_FIELDS}
+    return SilenceState(start_ms=start_ms, end_ms=end_ms, **values)
+
+
 @dataclass
 class AnechoicReport:
     """Full frame-level analysis for one audio stem. `query()` is the
@@ -221,39 +215,22 @@ class AnechoicReport:
     time window, e.g. one Note's [start_ms, end_ms)."""
     frame_times_ms: np.ndarray
     feature_maps: Dict[str, np.ndarray]
-    regions: List[SilenceRegion]
+    regions: List[SilenceRegion]            # silent regions (kept name)
     stem: StemType
     duration_seconds: float
+    resonant_regions: List[SilenceRegion] = field(default_factory=list)
 
     def query(self, start_ms: float, end_ms: float) -> SilenceState:
         idx = self._window_slice(start_ms, end_ms)
         if idx.size == 0:
             return self._empty_state(start_ms, end_ms)
+        return _state_from_map(self.feature_maps, idx, start_ms, end_ms)
 
-        def avg(name: str) -> float:
-            return float(np.mean(self.feature_maps[name][idx]))
-
-        return SilenceState(
-            start_ms=start_ms, end_ms=end_ms,
-            energy_floor=avg("energy_floor"),
-            spectral_stasis=avg("spectral_stasis"),
-            harmonic_persistence=avg("harmonic_persistence"),
-            noise_floor_probability=avg("noise_floor_probability"),
-            decay_completion=avg("decay_completion"),
-            transient_absence=avg("transient_absence"),
-            rhythmic_void_probability=avg("rhythmic_void_probability"),
-            resonance_probability=avg("resonance_probability"),
-            active_material_probability=avg("active_material_probability"),
-            cymbal_wash_probability=avg("cymbal_wash_probability"),
-            pedal_tone_probability=avg("pedal_tone_probability"),
-            confidence=avg("confidence"),
-        )
-
-    def get_silent_regions(self, threshold: float = 0.65) -> List[SilenceRegion]:
+    def get_silent_regions(self, threshold: float = ANECHOIC_SILENT_REGION_THRESHOLD) -> List[SilenceRegion]:
         return [r for r in self.regions if r.state.rhythmic_void_probability >= threshold]
 
-    def get_resonant_regions(self, threshold: float = 0.60) -> List[SilenceRegion]:
-        return [r for r in self.regions if r.state.resonance_probability >= threshold]
+    def get_resonant_regions(self, threshold: float = ANECHOIC_RESONANT_REGION_THRESHOLD) -> List[SilenceRegion]:
+        return [r for r in self.resonant_regions if r.state.resonance_probability >= threshold]
 
     def _window_slice(self, start_ms: float, end_ms: float) -> np.ndarray:
         if end_ms < start_ms:
@@ -271,67 +248,60 @@ class AnechoicReport:
         )
 
 
-def _derive_regions(times_ms: np.ndarray, fmap: Dict[str, np.ndarray], threshold: float) -> List[SilenceRegion]:
-    """Contiguous rhythmic-void regions above `threshold`, merging
-    fragments less than ANECHOIC_REGION_MERGE_GAP_SEC apart."""
-    score = fmap["rhythmic_void_probability"]
-    mask = score > threshold
+def _find_spans(score: np.ndarray, threshold: float, merge_gap_frames: int,
+                min_frames: int = 2) -> List[Tuple[int, int]]:
+    """Contiguous index spans where score > threshold, merging spans
+    separated by fewer than `merge_gap_frames` frames."""
+    if len(score) == 0:
+        return []
+    mask = (score > threshold).astype(int)
+    d = np.diff(np.concatenate(([0], mask, [0])))
+    starts = np.where(d == 1)[0]
+    ends = np.where(d == -1)[0] - 1
+    if len(starts) == 0:
+        return []
 
+    merged: List[Tuple[int, int]] = []
+    cur_a, cur_b = int(starts[0]), int(ends[0])
+    for a, b in zip(starts[1:], ends[1:]):
+        if int(a) - cur_b - 1 < merge_gap_frames:
+            cur_b = int(b)
+        else:
+            merged.append((cur_a, cur_b))
+            cur_a, cur_b = int(a), int(b)
+    merged.append((cur_a, cur_b))
+
+    return [(a, b) for a, b in merged if (b - a + 1) >= min_frames]
+
+
+def _derive_regions(times_ms: np.ndarray, fmap: Dict[str, np.ndarray],
+                    key: str, threshold: float) -> List[SilenceRegion]:
+    """Regions where fmap[key] > threshold. Each region's state is
+    recomputed from its own (merged) span."""
+    fps = ANECHOIC_SAMPLE_RATE / ANECHOIC_HOP_LENGTH
+    gap_frames = max(1, int(round(ANECHOIC_REGION_MERGE_GAP_SEC * fps)))
     regions: List[SilenceRegion] = []
-    start_idx: Optional[int] = None
-    for i, flag in enumerate(mask):
-        if flag and start_idx is None:
-            start_idx = i
-        elif not flag and start_idx is not None:
-            r = _make_region(times_ms, fmap, start_idx, i - 1)
-            if r:
-                regions.append(r)
-            start_idx = None
-    if start_idx is not None:
-        r = _make_region(times_ms, fmap, start_idx, len(mask) - 1)
-        if r:
-            regions.append(r)
-
-    if len(regions) > 1:
-        merged: List[SilenceRegion] = []
-        cur = regions[0]
-        merge_gap_ms = ANECHOIC_REGION_MERGE_GAP_SEC * 1000.0
-        for nxt in regions[1:]:
-            if nxt.start_ms - cur.end_ms < merge_gap_ms:
-                cur = SilenceRegion(cur.start_ms, nxt.end_ms, cur.state)
-            else:
-                merged.append(cur)
-                cur = nxt
-        merged.append(cur)
-        regions = merged
-
+    for a, b in _find_spans(fmap[key], threshold, gap_frames):
+        idx = np.arange(a, b + 1)
+        start_ms, end_ms = float(times_ms[a]), float(times_ms[b])
+        regions.append(SilenceRegion(
+            start_ms=start_ms, end_ms=end_ms,
+            state=_state_from_map(fmap, idx, start_ms, end_ms),
+        ))
     return regions
 
 
-def _make_region(times_ms: np.ndarray, fmap: Dict[str, np.ndarray], a: int, b: int) -> Optional[SilenceRegion]:
-    if b <= a:
-        return None
-    idx = np.arange(a, b + 1)
+# =====================================================================
+# Main entry point
+# =====================================================================
 
-    def avg(name: str) -> float:
-        return float(np.mean(fmap[name][idx]))
-
-    state = SilenceState(
-        start_ms=float(times_ms[a]), end_ms=float(times_ms[b]),
-        energy_floor=avg("energy_floor"),
-        spectral_stasis=avg("spectral_stasis"),
-        harmonic_persistence=avg("harmonic_persistence"),
-        noise_floor_probability=avg("noise_floor_probability"),
-        decay_completion=avg("decay_completion"),
-        transient_absence=avg("transient_absence"),
-        rhythmic_void_probability=avg("rhythmic_void_probability"),
-        resonance_probability=avg("resonance_probability"),
-        active_material_probability=avg("active_material_probability"),
-        cymbal_wash_probability=avg("cymbal_wash_probability"),
-        pedal_tone_probability=avg("pedal_tone_probability"),
-        confidence=avg("confidence"),
+def _empty_report(stem: StemType, duration_seconds: float) -> AnechoicReport:
+    return AnechoicReport(
+        frame_times_ms=np.zeros(0),
+        feature_maps={name: np.zeros(0) for name in _STATE_FIELDS},
+        regions=[], stem=stem, duration_seconds=duration_seconds,
+        resonant_regions=[],
     )
-    return SilenceRegion(start_ms=float(times_ms[a]), end_ms=float(times_ms[b]), state=state)
 
 
 def analyze_stem(engine: AudioEngine, track: AudioTrack, stem: StemType) -> AnechoicReport:
@@ -341,77 +311,89 @@ def analyze_stem(engine: AudioEngine, track: AudioTrack, stem: StemType) -> Anec
     view = engine.view(track, ANECHOIC_SAMPLE_RATE)
     y = view.samples
     sr = ANECHOIC_SAMPLE_RATE
+    duration_seconds = len(y) / sr
 
     rms = librosa.feature.rms(y=y, frame_length=ANECHOIC_FFT_SIZE, hop_length=ANECHOIC_HOP_LENGTH)[0]
     times_ms = librosa.frames_to_time(np.arange(len(rms)), sr=sr, hop_length=ANECHOIC_HOP_LENGTH) * 1000.0
 
-    # Reuses AudioEngine's own cached onset envelope - identical call
-    # (librosa.onset.onset_strength) to what the original computed
-    # fresh every time; no reason to pay for it twice.
+    # AudioEngine's cached onset envelope (same hop as everything else).
     flux = engine.onset_envelope(track, sr, hop_length=ANECHOIC_HOP_LENGTH)
 
-    flatness = librosa.feature.spectral_flatness(y=y, n_fft=ANECHOIC_FFT_SIZE, hop_length=ANECHOIC_HOP_LENGTH)[0]
+    flatness = librosa.feature.spectral_flatness(
+        y=y, n_fft=ANECHOIC_FFT_SIZE, hop_length=ANECHOIC_HOP_LENGTH
+    )[0]
 
-    # Reuses AudioEngine's cached STFT rather than recomputing it here -
-    # identical call (librosa.stft over the same mono view at the same
-    # n_fft/hop), and the Audio Engine boundary (§7) is the one place
-    # transforms are meant to be computed and cached.
-    S = np.abs(engine.stft(track, sr, n_fft=ANECHOIC_FFT_SIZE, hop_length=ANECHOIC_HOP_LENGTH))
-    harmonic_proxy = np.mean(S, axis=0)
-
-    min_len = min(len(rms), len(flux), len(flatness), len(harmonic_proxy))
-    rms, flux, flatness, harmonic_proxy = rms[:min_len], flux[:min_len], flatness[:min_len], harmonic_proxy[:min_len]
+    min_len = min(len(rms), len(flux), len(flatness))
+    if min_len == 0:
+        return _empty_report(stem, duration_seconds)
+    rms, flux, flatness = rms[:min_len], flux[:min_len], flatness[:min_len]
     times_ms = times_ms[:min_len]
 
     fps = sr / ANECHOIC_HOP_LENGTH
     roll_win = max(5, int(fps * ANECHOIC_ADAPTIVE_WINDOW_SEC))
-    floor = _rolling_percentile(rms, roll_win, 10)
 
-    margin = np.percentile(rms, 60) * 0.05 * _margin_multiplier(stem)
-    quietness = np.clip((floor + margin - rms) / (floor + margin + EPS), 0, 1)
-    energy_floor = _safe_norm(quietness)
+    # ---- Level: dB above a local floor, FIXED range, absolute gate ---
+    rms_db = 20.0 * np.log10(np.maximum(rms, 1e-10))
+    local_floor_db = _rolling_percentile(rms_db, roll_win, ANECHOIC_LEVEL_FLOOR_PCT)
+    # Cap the floor below a robust loud reference so a long held note
+    # (which would become its own floor) still reads as present.
+    ref_db = float(np.percentile(rms_db, ANECHOIC_REF_PCT))
+    floor_db = np.minimum(local_floor_db, ref_db - ANECHOIC_LEVEL_RANGE_DB)
+    level = np.clip((rms_db - floor_db) / ANECHOIC_LEVEL_RANGE_DB, 0.0, 1.0)
+    level[rms_db < ANECHOIC_ABS_GATE_DBFS] = 0.0   # silent stem can't invent a peak
 
-    flux_norm = _safe_norm(flux)
-    spectral_stasis = 1.0 - flux_norm
-    noise_floor_probability = _safe_norm(flatness)
-    harmonic_persistence = _safe_norm(harmonic_proxy)
+    present = np.clip(level / ANECHOIC_PRESENT_LEVEL, 0.0, 1.0)
 
-    smooth_rms = _moving_average(rms, 5)
-    decay_completion = _safe_norm(np.clip(-np.gradient(smooth_rms), 0, None))
-    transient_absence = 1.0 - flux_norm
-
-    high_freq_energy = _band_rms(y, sr, min_len, cutoff_hz=2000.0, highpass=True)
-    low_freq_energy = _band_rms(y, sr, min_len, cutoff_hz=250.0, highpass=False)
-    cymbal_wash_probability = _safe_norm(high_freq_energy * (1.0 - flux_norm))
-    pedal_tone_probability = _safe_norm(low_freq_energy * harmonic_persistence)
-
-    w = _composite_weights(stem)
-    rhythmic_void_probability = np.clip(
-        w["void_energy"] * energy_floor + w["void_stasis"] * spectral_stasis
-        + w["void_transient"] * transient_absence + w["void_decay"] * decay_completion
-        + w["void_noise"] * (1.0 - noise_floor_probability),
-        0, 1,
+    # ---- Fall: positive slope of -dB/frame --------------------------
+    smooth_db = _smooth(rms_db, ANECHOIC_SLOPE_SMOOTH_FRAMES)
+    slope_down = -np.gradient(smooth_db)
+    fall = np.clip(
+        (slope_down - ANECHOIC_FALL_DEADZONE_DB)
+        / (ANECHOIC_FALL_FULL_DB - ANECHOIC_FALL_DEADZONE_DB),
+        0.0, 1.0,
     )
-    resonance_probability = np.clip(
-        w["res_harmonic"] * harmonic_persistence + w["res_stasis"] * spectral_stasis
-        + w["res_cymbal"] * cymbal_wash_probability + w["res_pedal"] * pedal_tone_probability
-        + w["res_decay"] * (1.0 - decay_completion),
-        0, 1,
-    )
-    active_material_probability = np.clip(
-        w["active_flux"] * flux_norm + w["active_energy"] * (1.0 - energy_floor)
-        + w["active_stasis"] * (1.0 - spectral_stasis) + w["active_harmonic"] * harmonic_persistence,
-        0, 1,
-    )
-    confidence = np.clip(1.0 - np.abs(rhythmic_void_probability - 0.5) * 1.5, 0.3, 0.95)
+
+    # ---- Attack: onset strength on a fixed-ish scale ----------------
+    onset_ref = max(float(np.percentile(flux, ANECHOIC_ONSET_REF_PCT)), ANECHOIC_ONSET_REF_MIN)
+    onset_norm = np.clip(np.nan_to_num(flux) / onset_ref, 0.0, 1.0)
+    attack = maximum_filter1d(onset_norm, size=3)   # onsets smear over ~3 frames
+
+    # ---- Harmonicity ------------------------------------------------
+    flatness = np.clip(np.nan_to_num(flatness, nan=1.0), 0.0, 1.0)
+    harmonic_persistence = 1.0 - flatness
+    noise_floor_probability = flatness
+
+    # ---- The partition (sums to 1 on every frame) --------------------
+    # silent   = energy not present
+    # resonant = energy present, no new onset, level falling
+    # active   = energy present and not (a pure tail): struck or held
+    rhythmic_void_probability = 1.0 - present
+    resonance_probability = present * (1.0 - attack) * fall
+    active_material_probability = present - resonance_probability
+
+    # ---- Confidence: margin between the top two classes --------------
+    stacked = np.vstack([rhythmic_void_probability, resonance_probability, active_material_probability])
+    top_two = np.sort(stacked, axis=0)[-2:, :]
+    confidence = np.clip(top_two[1] - top_two[0], 0.0, 1.0)
+
+    # ---- Band fractions for cymbal wash / pedal tone ------------------
+    total_pow = rms ** 2 + EPS
+    high_rms = _band_rms(y, sr, min_len, cutoff_hz=2000.0, highpass=True)
+    low_rms = _band_rms(y, sr, min_len, cutoff_hz=250.0, highpass=False)
+    high_frac = np.clip(high_rms ** 2 / total_pow, 0.0, 1.0)
+    low_frac = np.clip(low_rms ** 2 / total_pow, 0.0, 1.0)
+
+    steady = (1.0 - attack) * (1.0 - fall)
+    cymbal_wash_probability = present * high_frac * fall * (1.0 - attack)
+    pedal_tone_probability = present * low_frac * steady
 
     feature_maps = {
-        "energy_floor": energy_floor,
-        "spectral_stasis": spectral_stasis,
+        "energy_floor": 1.0 - level,                 # quietness, 0..1
+        "spectral_stasis": 1.0 - attack,
         "harmonic_persistence": harmonic_persistence,
         "noise_floor_probability": noise_floor_probability,
-        "decay_completion": decay_completion,
-        "transient_absence": transient_absence,
+        "decay_completion": fall,
+        "transient_absence": 1.0 - attack,
         "rhythmic_void_probability": rhythmic_void_probability,
         "resonance_probability": resonance_probability,
         "active_material_probability": active_material_probability,
@@ -420,14 +402,20 @@ def analyze_stem(engine: AudioEngine, track: AudioTrack, stem: StemType) -> Anec
         "confidence": confidence,
     }
 
-    regions = _derive_regions(times_ms, feature_maps, _region_threshold(stem))
+    silent_regions = _derive_regions(
+        times_ms, feature_maps, "rhythmic_void_probability", ANECHOIC_SILENT_REGION_THRESHOLD
+    )
+    resonant_regions = _derive_regions(
+        times_ms, feature_maps, "resonance_probability", ANECHOIC_RESONANT_REGION_THRESHOLD
+    )
 
     return AnechoicReport(
         frame_times_ms=times_ms,
         feature_maps=feature_maps,
-        regions=regions,
+        regions=silent_regions,
         stem=stem,
-        duration_seconds=len(y) / sr,
+        duration_seconds=duration_seconds,
+        resonant_regions=resonant_regions,
     )
 
 
@@ -438,4 +426,5 @@ __all__ = [
     "RegionType",
     "analyze_stem",
     "ACOUSTIC_ACTIVITY_ANNOTATION_KIND",
+    "ANECHOIC_VALIDATED",
 ]
