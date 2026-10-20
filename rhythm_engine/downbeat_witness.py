@@ -59,6 +59,39 @@ class DownbeatWitness:
     source: Provenance = Provenance.RHYTHM_ENGINE
 
 
+def _run_dbn_downbeat(activations, beats_per_bar):
+    """Call madmom's DBNDownBeatTrackingProcessor.
+
+    The processor picks its best HMM with
+    `np.argmax(np.asarray(results)[:, 1])`, where `results` holds
+    one variable-length beat path per candidate. Pre-1.24 numpy
+    built an object array for that ragged list; numpy >= 1.24
+    raises ValueError, so on the pinned band (numpy 1.26) the
+    downbeat witness died inside madmom. This restores the old
+    behaviour for THIS call only - np.asarray falls back to
+    dtype=object on the ragged sequence - and restores the real
+    np.asarray in the finally. madmom itself is not patched; the
+    deleted platform behaviour is restored at Grimlock's call
+    boundary, the same pattern as runtime_compat's aliases."""
+    from madmom.features.downbeats import DBNDownBeatTrackingProcessor
+
+    proc = DBNDownBeatTrackingProcessor(
+        beats_per_bar=list(beats_per_bar), fps=100)
+    orig_asarray = np.asarray
+
+    def _asarray_with_object_fallback(a, *args, **kwargs):
+        try:
+            return orig_asarray(a, *args, **kwargs)
+        except ValueError:
+            return orig_asarray(a, dtype=object)
+
+    np.asarray = _asarray_with_object_fallback
+    try:
+        return proc(activations)
+    finally:
+        np.asarray = orig_asarray
+
+
 def run_madmom_downbeat(
         engine: AudioEngine,
         track: AudioTrack,
@@ -68,7 +101,7 @@ def run_madmom_downbeat(
     DownbeatWitness, or None if the tracker produced too little to judge.
     Mirrors run_madmom_tempo's temp-WAV pattern (madmom's processors read
     a file, not a raw array)."""
-    from madmom.features.downbeats import RNNDownBeatProcessor, DBNDownBeatTrackingProcessor
+    from madmom.features.downbeats import RNNDownBeatProcessor
 
     view = engine.view(track, DOWNBEAT_SAMPLE_RATE)
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
@@ -76,7 +109,7 @@ def run_madmom_downbeat(
     try:
         sf.write(temp_path, view.samples, DOWNBEAT_SAMPLE_RATE)
         activations = RNNDownBeatProcessor()(temp_path)
-        result = DBNDownBeatTrackingProcessor(beats_per_bar=list(beats_per_bar), fps=100)(activations)
+        result = _run_dbn_downbeat(activations, beats_per_bar)
     finally:
         try:
             os.unlink(temp_path)
