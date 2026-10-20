@@ -1,0 +1,33 @@
+# Grimlock 6.0 — the known-good compatibility band.
+#
+# These libraries cannot be upgraded onto one current numpy; the
+# band below is the intersection that works. Do not let a later
+# pip install resolve outside it: numpy 2 will not load the
+# TensorFlow 2.15 wheel, and numpy 1.23 (madmom's comfort zone)
+# pulls TensorFlow and librosa apart. madmom 0.16.1 is
+# unmaintained and imports on numpy 1.26 ONLY because
+# runtime_compat.install_runtime_aliases() restores the np.float /
+# np.int / ... names numpy 1.24 removed — do not fork madmom, the
+# alias is the whole compatibility surface.
+#
+# Historical note: Jazz originally ran on the shared Symphony
+# two-layer environment (see README). This file pins that same
+# band explicitly so the environment is reproducible without it.
+
+numpy>=1.26,<2
+scipy>=1.13,<1.16          # must still ship scipy.signal.windows.gaussian
+tensorflow==2.15.*         # Basic Pitch 0.3.0 + CREPE (numpy 1.x only)
+librosa>=0.10,<0.12
+madmom==0.16.1             # build needs Cython present first: its setup.py
+                           # imports Cython without declaring it, so a clean
+                           # pip build-isolation env fails metadata generation
+basic-pitch==0.3.*
+crepe>=0.0.16
+torch==2.2.*               # CPU wheels: pip install --index-url https://download.pytorch.org/whl/cpu
+torchaudio==2.2.*
+demucs==4.1.0
+soundfile
+mido
+pretty_midi
+music21
+pytest
