@@ -49,6 +49,7 @@ from typing import Dict, List, Optional, Sequence
 import numpy as np
 
 from core import Note
+from acoustic_witness.anechoic_ma import ANECHOIC_VALIDATED
 
 NOTE_SUPPORT_ANNOTATION_KIND = "note_support"
 NOTE_SUPPORT_SAMPLE_RATE = 22050
@@ -127,7 +128,14 @@ def evaluate_stem_support(
         e_own = energies[n.id]
         active = float(active_by_note_id.get(n.id, 1.0))  # unknown activity -> treat as active (supported)
         weak = e_own < weak_threshold
-        inactive = active < LOW_ACTIVITY_THRESHOLD
+        # ANECHOIC GATE: until AnechoicMa is validated on material its
+        # tuners did not build (anechoic_ma.ANECHOIC_VALIDATED), low
+        # activity alone must not convict - the 0.15 line was drawn
+        # through scores the old probability block produced, and that
+        # block measured loudness, not activity. When unvalidated,
+        # `inactive` stays False and only genuinely weak own-energy
+        # notes fall back to SUPPORTED-with-a-reason either way.
+        inactive = active < LOW_ACTIVITY_THRESHOLD and ANECHOIC_VALIDATED
         unsupported = weak and inactive
         ratio = e_own / (median + 1e-9)
         if unsupported:
