@@ -150,4 +150,76 @@ def resolve_instrument_identity(
     lines = stream_into_lines(notes)
 
     # Persist voice membership (line_id) for every note, before any
-    # family branch, so the engraver can put voices on
+    # family branch, so the engraver can put voices on the staff even
+    # when a line's family ends up contested or unknown.
+    for line in lines:
+        for note in line.notes:
+            annotations.add(Annotation(
+                note_id=note.id,
+                kind=VOICE_ANNOTATION_KIND,
+                value=line.line_id,
+                source=Provenance.VOICE_CONTINUITY,
+                confidence=1.0,
+                contested=False,
+            ))
+
+    # Fingerprints are computed ONCE for the whole stem, not per line:
+    # collision detection needs every note that sounds together.
+    fingerprints = fingerprint_notes(engine, track, notes)
+
+    known_family = STEM_FAMILY.get(stem)
+
+    for line in lines:
+        family: Optional[str] = None
+        confidence = 0.0
+        contested = True
+
+        # Step 1: a CLEAN pre-merge stem vote wins outright - every
+        # voted note in the line agreeing, none of them contested.
+        # Overtones never overrule it (module header, rule 1).
+        if stem_votes:
+            votes = [stem_votes[n.id] for n in line.notes if n.id in stem_votes]
+            if votes and len({v[0] for v in votes}) == 1 \
+                    and not any(v[2] for v in votes):
+                family = votes[0][0]
+                confidence = float(np.median([v[1] for v in votes]))
+                contested = False
+
+        if family is None and known_family is not None \
+                and stem is not StemType.VOCALS:
+            # Separation already named this stem at the audio layer
+            # (htdemucs_6s guitar/piano/bass/drums); trust it as-is.
+            family, confidence, contested = known_family, 1.0, False
+
+        if family is None:
+            line_fps = [fingerprints[n.id] for n in line.notes
+                        if n.id in fingerprints]
+            ladder_family, ladder_conf, ladder_contested, _decided = \
+                _classify_line(pool_fingerprints(line_fps))
+            if stem is StemType.VOCALS:
+                # VOCALS guard (module header): the line keeps the
+                # "vocals" label, but if it positively measures as a
+                # struck string / brass / clarinet it is flagged
+                # contested - a leaked horn is flagged, not trusted.
+                family = known_family
+                confidence = 1.0
+                contested = ladder_family != FALLBACK_FAMILY
+            else:
+                family, confidence, contested = \
+                    ladder_family, ladder_conf, ladder_contested
+
+        for note in line.notes:
+            annotations.add(Annotation(
+                note_id=note.id,
+                kind=ANNOTATION_KIND,
+                value=family,
+                source=Provenance.TIMBRE_INTELLIGENCE,
+                confidence=confidence,
+                contested=contested,
+            ))
+
+    return lines
+
+
+__all__ = ["resolve_instrument_identity", "STEM_FAMILY", "StemVotes",
+           "ANNOTATION_KIND", "VOICE_ANNOTATION_KIND"]
