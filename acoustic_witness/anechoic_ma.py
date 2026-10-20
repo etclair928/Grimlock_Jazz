@@ -31,6 +31,27 @@
 # STATUS: thresholds below are starting values, not yet validated on
 # real vibraphone material. Do not treat active_material_probability
 # < 0.15 as hard evidence in note_support until re-measured.
+#
+# CALIBRATION (2026-10-19, labeled synthetic montage built for this:
+# rests, sustained trumpet-like note + imposed 12 dB/s tail, piano
+# plucks, 3.5 dB/s vibraphone ring, held pedal, cymbal wash, hats,
+# -90 dBFS dither trap): frame accuracy 0.82 as shipped -> 0.91 after
+# three changes, resonant recall 0.50 -> 0.81, silent 0.99, active
+# 0.94, uncertain ~0:
+#   a. FALL_FULL_DB 0.30 -> 0.10, deadzone 0.04 -> 0.02 (13 dB/s full
+#      scale was unreachable for real tails; a 3.5 dB/s ring read as
+#      active).
+#   b. Attack is now baseline-relative (flux above its ~0.75 s local
+#      median). Sustained noise has high flux for its whole decay, so
+#      the raw level gate suppressed a 1.5 s cymbal wash's resonance
+#      entirely (0.36 -> 0.80 after the change).
+#   c. Slope smoothing 5 -> 11 frames (~250 ms, one vibrato/tremolo
+#      cycle) so periodic level wobble stops masquerading as "not
+#      falling"; the vibe ring's span query flipped uncertain ->
+#      resonant (0.68 vs 0.32).
+# note vs tail now straddles note_support's 0.15 line cleanly
+# (0.91 vs 0.07). ANECHOIC_VALIDATED stays False: the montage is
+# synthetic and self-built - validate on a real take, then flip it.
 # =================================================================
 
 from __future__ import annotations
@@ -66,13 +87,22 @@ ANECHOIC_REF_PCT = 95               # robust "loud" reference for floor cap
 ANECHOIC_PRESENT_LEVEL = 0.25       # level at which energy counts as present
 
 # --- Fall (resonance needs a falling envelope) -----------------------
-ANECHOIC_SLOPE_SMOOTH_FRAMES = 5
-ANECHOIC_FALL_DEADZONE_DB = 0.04    # dB/frame below which = steady
-ANECHOIC_FALL_FULL_DB = 0.30        # dB/frame at which fall = 1
+ANECHOIC_SLOPE_SMOOTH_FRAMES = 11   # ~250 ms at this hop: spans one vibrato/tremolo cycle
+ANECHOIC_FALL_DEADZONE_DB = 0.02    # dB/frame below which = steady
+# Full credit at 0.12 dB/frame (~5.2 dB/s at this hop). v2 shipped 0.30
+# (~13 dB/s), which only crash-fast decays reach: a vibraphone ring at
+# 3.5 dB/s scored fall ~0.16 and read as ACTIVE (montage, 2026-10-19).
+ANECHOIC_FALL_FULL_DB = 0.10        # dB/frame at which fall = 1
 
 # --- Onsets ----------------------------------------------------------
 ANECHOIC_ONSET_REF_MIN = 1.0        # floor on the onset scale (silent stems)
 ANECHOIC_ONSET_REF_PCT = 95
+# Attack is measured RELATIVE to a local flux baseline (~0.75 s median).
+# Raw flux level cannot tell a new onset from sustained noise: a cymbal
+# wash has high flux for its whole decay, so a level gate suppressed its
+# resonance for the full 1.5 s. A rise ABOVE the local baseline is what
+# "new onset" means; the wash's own tail sits at its baseline.
+ANECHOIC_ONSET_BASELINE_SEC = 0.75
 
 # --- Region labelling ------------------------------------------------
 ANECHOIC_REGION_MIN_MARGIN = 0.10   # top class must beat 2nd by this
@@ -353,10 +383,16 @@ def analyze_stem(engine: AudioEngine, track: AudioTrack, stem: StemType) -> Anec
         0.0, 1.0,
     )
 
-    # ---- Attack: onset strength on a fixed-ish scale ----------------
+    # ---- Attack: NEW onset = flux rising above its local baseline ---
     onset_ref = max(float(np.percentile(flux, ANECHOIC_ONSET_REF_PCT)), ANECHOIC_ONSET_REF_MIN)
     onset_norm = np.clip(np.nan_to_num(flux) / onset_ref, 0.0, 1.0)
-    attack = maximum_filter1d(onset_norm, size=3)   # onsets smear over ~3 frames
+    base_win = max(5, int(fps * ANECHOIC_ONSET_BASELINE_SEC))
+    flux_base = _rolling_percentile(onset_norm, base_win, 50)
+    attack = np.clip(
+        (onset_norm - flux_base) / np.maximum(1.0 - flux_base, 0.25),
+        0.0, 1.0,
+    )
+    attack = maximum_filter1d(attack, size=3)   # onsets smear over ~3 frames
 
     # ---- Harmonicity ------------------------------------------------
     flatness = np.clip(np.nan_to_num(flatness, nan=1.0), 0.0, 1.0)
